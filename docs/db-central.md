@@ -206,9 +206,10 @@ Access layer: `src/db/agent-destinations.ts`.
 
 ### 1.11 `pending_approvals`
 
-Two workflows share this table:
+The common approval primitive, sender admission, and OneCLI credential bridge share this table:
 
-- **Session-bound MCP approvals** — `install_packages`, `add_mcp_server`. `session_id` is set.
+- **Session-bound approvals** — CLI mutations, self-modification, agent creation, and a2a sends. `session_id` is set.
+- **Sender admission** — sessionless `sender_admit` rows with an in-flight `dedup_key`.
 - **OneCLI credential approvals** — `session_id` may be NULL; `agent_group_id` + `channel_type` + `platform_id` route the admin card.
 
 ```sql
@@ -226,14 +227,20 @@ CREATE TABLE pending_approvals (
   expires_at          TEXT,
   status              TEXT NOT NULL DEFAULT 'pending',
   title               TEXT NOT NULL DEFAULT '',
-  options_json        TEXT NOT NULL DEFAULT '[]'
+  options_json        TEXT NOT NULL DEFAULT '[]',
+  approver_user_id    TEXT,
+  approver_rule       TEXT NOT NULL DEFAULT 'admins-of-scope',
+  dedup_key           TEXT
 );
 CREATE INDEX idx_pending_approvals_action_status ON pending_approvals(action, status);
+CREATE UNIQUE INDEX idx_pending_approvals_dedup
+  ON pending_approvals(dedup_key) WHERE dedup_key IS NOT NULL;
 ```
 
-- `status`: `pending` | `approved` | `rejected` | `expired`.
+- `status`: `pending` | `approved` | `rejected` | `expired` | `awaiting_reason`.
+- `approver_rule`: `exclusive` names exactly one resolver in `approver_user_id`; `admins-of-scope` uses the anchored group's admin chain and may also record the card recipient.
 - `platform_message_id` lets the host edit the admin card in place after a decision.
-- Access layer: `src/db/sessions.ts`; sweep + delivery: `src/onecli-approvals.ts`.
+- Access layer: `src/db/sessions.ts`; lifecycle contract: `src/modules/approvals/primitive.ts`; sweep + delivery: `src/modules/approvals/onecli-approvals.ts`.
 
 ### 1.12 `unregistered_senders`
 
@@ -327,9 +334,9 @@ CREATE TABLE container_configs (
 - **Readers:** `src/container-config.ts`, `src/container-runner.ts`, `src/cli/dispatch.ts` (scope enforcement), `src/claude-md-compose.ts`
 - **Writers:** `src/db/container-configs.ts`, `src/modules/self-mod/apply.ts`, `src/backfill-container-configs.ts`
 
-### 1.16 `pending_sender_approvals`
+### 1.16 `pending_sender_approvals` (removed)
 
-In-flight state for the `unknown_sender_policy = 'request_approval'` flow. A row exists while an admin-approval card is outstanding for a first-time sender in a wired messaging group; `UNIQUE(messaging_group_id, sender_identity)` dedups concurrent attempts from the same sender instead of spamming the admin with repeat cards.
+Migration 011 originally introduced a dedicated table for unknown-sender approval. Migration 020 removes it: sender admission now uses a sessionless `pending_approvals` row with action `sender_admit`, and the partial-unique `dedup_key` preserves the old `(messaging_group_id, sender_identity)` in-flight dedup behavior. The dedicated schema is retained below only as migration history.
 
 ```sql
 CREATE TABLE pending_sender_approvals (
@@ -347,10 +354,7 @@ CREATE TABLE pending_sender_approvals (
 );
 ```
 
-Deleted on admin approve (after adding the sender as a member) or deny.
-
-- Access layer: `src/modules/permissions/db/pending-sender-approvals.ts`
-- **Readers/writers:** `src/modules/permissions/sender-approval.ts`, `src/modules/permissions/index.ts`, `src/db/sessions.ts` (`getAskQuestionRender`), `src/cli/resources/groups.ts`
+Current readers/writers use `src/db/sessions.ts`, `src/modules/permissions/sender-approval.ts`, and the shared approval response handler.
 
 ### 1.17 `pending_channel_approvals`
 
@@ -392,6 +396,13 @@ CREATE TABLE agent_message_policies (
 - Access layer: `src/modules/agent-to-agent/db/agent-message-policies.ts`
 - **Readers/writers:** `src/cli/resources/policies.ts`; approved messages create a row in `pending_approvals` (see §1.11) via the a2a send path.
 
+### 1.19 `approval_holds` (view)
+
+Read-only union of `pending_approvals` and synthesized `pending_channel_approvals` rows. This is the operator-facing answer to “what is pending now?” used by `ncl approvals list|get`; each consumer keeps its own write model and approve continuation.
+
+- Migration: `021-approval-holds-view.ts`
+- Reader: `src/cli/resources/approvals.ts`
+
 ---
 
 ## 2. Migration system
@@ -425,6 +436,9 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 | 16 | `messaging-group-instance` | `016-messaging-group-instance.ts` | `messaging_groups` gets an `instance` column (adapter-instance dimension); table recreate (`disableForeignKeys: true`) backfills `instance = channel_type` on every existing row and relaxes the `UNIQUE` to `(channel_type, platform_id, instance)` |
 | 17 | `agent-message-policies` | `017-agent-message-policies.ts` | `agent_message_policies` (see §1.18) |
 | 18 | `approvals-approver-user-id` | `018-approvals-approver-user-id.ts` | `pending_approvals.approver_user_id` — names a single required approver for a2a message-gate policies |
+| 19 | `wiring-threads-override` | `019-wiring-threads.ts` | Per-wiring thread-policy override |
+| 20 | `holds-approver-rule` | `020-holds-approver-rule.ts` | Common approver rule + dedup key on `pending_approvals`; folds sender holds into the common primitive |
+| 21 | `approval-holds-view` | `021-approval-holds-view.ts` | Read-only `approval_holds` union for all pending hold shapes |
 
 Numbers 5 and 6 are intentionally absent — migrations were renumbered during early development.
 

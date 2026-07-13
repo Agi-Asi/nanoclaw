@@ -121,12 +121,16 @@ describe('mayResolve matrix', () => {
       agentGroupId: 'ag-1',
       deliveredTo: null,
     });
-    // Malformed exclusive (no named user) falls back to the admin chain
-    // instead of bricking the hold.
-    expect(approverRuleOf({ ...base, approver_rule: 'exclusive', approver_user_id: null })).toEqual({
-      kind: 'admins-of-scope',
-      agentGroupId: 'ag-1',
-      deliveredTo: null,
+    // Corrupt exclusive rows must fail closed. Widening a missing assignee to
+    // the admin chain would silently change the authorization policy.
+    const malformedExclusive = approverRuleOf({
+      ...base,
+      approver_rule: 'exclusive',
+      approver_user_id: null,
     });
+    expect(malformedExclusive).toEqual({ kind: 'exclusive', approverUserId: null });
+    expect(mayResolve(malformedExclusive, OWNER)).toBe(false);
+    expect(mayResolve(malformedExclusive, GLOBAL_ADMIN)).toBe(false);
+    expect(mayResolve(malformedExclusive, DELIVEREE)).toBe(false);
   });
 });

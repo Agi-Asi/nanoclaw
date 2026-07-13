@@ -16,6 +16,7 @@ import { createAgentGroup } from '../../db/agent-groups.js';
 import { getDb } from '../../db/connection.js';
 import { createMessagingGroup } from '../../db/messaging-groups.js';
 import { createSession, createPendingApproval, getPendingApproval, getSession } from '../../db/sessions.js';
+import { setDeliveryAdapter } from '../../delivery.js';
 import { upsertUser } from '../permissions/db/users.js';
 import { grantRole } from '../permissions/db/user-roles.js';
 import { initSessionFolder } from '../../session-manager.js';
@@ -175,6 +176,7 @@ describe('approval-requested callbacks', () => {
     getDb()
       .prepare(`INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at) VALUES (?, ?, ?, ?)`)
       .run('slack:admin-1', 'slack', 'mg-dm-admin', now());
+    setDeliveryAdapter({ deliver: vi.fn().mockResolvedValue('platform-message-1') });
 
     const events: ApprovalRequestedEvent[] = [];
     registerApprovalRequestedHandler((event) => {

@@ -46,12 +46,18 @@ export async function handleApprovalsResponse(payload: ResponsePayload): Promise
   }
 
   if (approval.action === ONECLI_ACTION) {
-    if (resolveOneCLIApproval(payload.questionId, payload.value, clickerId ?? '')) {
+    // The expiry/sweep path marks the row before awaiting its card edit. A
+    // click in that window is already too late and must not delete the row or
+    // emit a second terminal event; the owning path will finish both.
+    if (approval.status === 'expired') return true;
+    if (await resolveOneCLIApproval(payload.questionId, payload.value, clickerId ?? '')) {
       return true;
     }
     // Row exists but the in-memory resolver is gone (timer fired or the process
-    // was in a weird state). Nothing to do — just drop the row.
+    // restarted before the click). End the durable lifecycle as a sweep: the
+    // click cannot resume the credentialed request without its live Promise.
     deletePendingApproval(payload.questionId);
+    await notifyApprovalResolved({ approval, session: null, outcome: 'sweep', userId: clickerId ?? '' });
     return true;
   }
 

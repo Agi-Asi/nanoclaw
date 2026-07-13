@@ -145,7 +145,7 @@ export async function notifyApprovalResolved(event: ApprovalResolvedEvent): Prom
 
 // ── Approval-requested callbacks ──
 // The creation-side sibling of the resolved observer: fires once whenever a
-// hold record comes into existence, whichever stack created it —
+// delivered hold becomes externally actionable, whichever stack created it —
 // requestApproval (cli_command, create_agent, self-mod, a2a, sender
 // admission), the OneCLI credential bridge (its own rows, ids and card), and
 // channel registration (as a synthesized hold view). Together with
@@ -172,7 +172,7 @@ export function registerApprovalRequestedHandler(handler: ApprovalRequestedHandl
   approvalRequestedHandlers.push(handler);
 }
 
-/** Fire every registered approval-requested callback. Called wherever a hold record is created. */
+/** Fire every registered approval-requested callback after a hold's card is delivered. */
 export async function notifyApprovalRequested(event: ApprovalRequestedEvent): Promise<void> {
   for (const handler of approvalRequestedHandlers) {
     try {
@@ -364,35 +364,38 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
     return;
   }
 
+  const adapter = getDeliveryAdapter();
+  if (!adapter) {
+    deletePendingApproval(approvalId);
+    fail('the delivery adapter is unavailable.');
+    return;
+  }
+  try {
+    await adapter.deliver(
+      target.messagingGroup.channel_type,
+      target.messagingGroup.platform_id,
+      null,
+      'chat-sdk',
+      JSON.stringify({
+        type: 'ask_question',
+        questionId: approvalId,
+        title,
+        question,
+        options: cardOptions,
+      }),
+    );
+  } catch (err) {
+    log.error('Failed to deliver approval card', { action, approvalId, err });
+    // The single delivery target never saw the card — remove the row so it
+    // can't linger as a pending approval nobody can act on.
+    deletePendingApproval(approvalId);
+    fail(`could not deliver approval request to ${target.userId}.`);
+    return;
+  }
+
   const created = getPendingApproval(approvalId);
   if (created) {
     await notifyApprovalRequested({ approval: created, session: session ?? null, deliveredTo: target.userId });
-  }
-
-  const adapter = getDeliveryAdapter();
-  if (adapter) {
-    try {
-      await adapter.deliver(
-        target.messagingGroup.channel_type,
-        target.messagingGroup.platform_id,
-        null,
-        'chat-sdk',
-        JSON.stringify({
-          type: 'ask_question',
-          questionId: approvalId,
-          title,
-          question,
-          options: cardOptions,
-        }),
-      );
-    } catch (err) {
-      log.error('Failed to deliver approval card', { action, approvalId, err });
-      // The single delivery target never saw the card — remove the row so it
-      // can't linger as a pending approval nobody can act on.
-      deletePendingApproval(approvalId);
-      fail(`could not deliver approval request to ${target.userId}.`);
-      return;
-    }
   }
 
   log.info('Approval requested', { action, approvalId, agentName, approver: target.userId });

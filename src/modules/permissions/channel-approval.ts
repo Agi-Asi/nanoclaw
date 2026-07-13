@@ -57,6 +57,7 @@ import type { AgentGroup, PendingApproval } from '../../types.js';
 import { notifyApprovalRequested, pickApprovalDelivery, pickApprover } from '../approvals/primitive.js';
 import {
   createPendingChannelApproval,
+  deletePendingChannelApproval,
   hasInFlightChannelApproval,
   type PendingChannelApproval,
 } from './db/pending-channel-approvals.js';
@@ -259,12 +260,17 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
     title,
     options_json: JSON.stringify(options),
   };
-  createPendingChannelApproval(row);
-  await notifyApprovalRequested({ approval: channelHoldView(row), session: null, deliveredTo: delivery.userId });
+  if (!createPendingChannelApproval(row)) {
+    log.debug('Channel registration already in flight — concurrent request lost the insert race', {
+      messagingGroupId,
+    });
+    return;
+  }
 
   const adapter = getDeliveryAdapter();
   if (!adapter) {
-    log.error('Channel registration row created but no delivery adapter is wired', { messagingGroupId });
+    deletePendingChannelApproval(messagingGroupId);
+    log.error('Channel registration skipped because no delivery adapter is wired', { messagingGroupId });
     return;
   }
 
@@ -287,7 +293,9 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
       agentGroupCount: agentGroups.length,
       approver: delivery.userId,
     });
+    await notifyApprovalRequested({ approval: channelHoldView(row), session: null, deliveredTo: delivery.userId });
   } catch (err) {
+    deletePendingChannelApproval(messagingGroupId);
     log.error('Channel registration card delivery failed', { messagingGroupId, err });
   }
 }
@@ -332,7 +340,7 @@ export function channelHoldView(
     action: 'channel_registration',
     payload: JSON.stringify({ messagingGroupId: row.messaging_group_id, ...payloadExtra }),
     created_at: row.created_at,
-    agent_group_id: null,
+    agent_group_id: row.agent_group_id,
     channel_type: null,
     platform_id: null,
     platform_message_id: null,

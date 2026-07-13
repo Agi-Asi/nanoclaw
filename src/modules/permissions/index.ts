@@ -294,7 +294,10 @@ async function wireApprovedChannel(
       messagingGroupId: row.messaging_group_id,
       err,
     });
-    deletePendingChannelApproval(row.messaging_group_id);
+    await resolveChannelHold(row, 'approve', approverId, {
+      targetAgentGroupId: agentGroupId,
+      continuationError: 'invalid_stored_event',
+    });
     return false;
   }
 
@@ -317,7 +320,10 @@ async function wireApprovedChannel(
       messagingGroupId: row.messaging_group_id,
       err,
     });
-    deletePendingChannelApproval(row.messaging_group_id);
+    await resolveChannelHold(row, 'approve', approverId, {
+      targetAgentGroupId: agentGroupId,
+      continuationError: 'unresolvable_channel_defaults',
+    });
     return false;
   }
 
@@ -355,15 +361,9 @@ async function wireApprovedChannel(
     });
   }
 
-  deletePendingChannelApproval(row.messaging_group_id);
-  await notifyApprovalResolved({
-    approval: channelHoldView(row, {
-      targetAgentGroupId: agentGroupId,
-      ...(createdAgentGroup ? { createdAgentGroup: true } : {}),
-    }),
-    session: null,
-    outcome: 'approve',
-    userId: approverId,
+  await resolveChannelHold(row, 'approve', approverId, {
+    targetAgentGroupId: agentGroupId,
+    ...(createdAgentGroup ? { createdAgentGroup: true } : {}),
   });
 
   try {
@@ -375,6 +375,22 @@ async function wireApprovedChannel(
     });
   }
   return true;
+}
+
+/** Delete a channel hold and announce its terminal decision through the common lifecycle hook. */
+async function resolveChannelHold(
+  row: PendingChannelApproval,
+  outcome: 'approve' | 'reject',
+  userId: string,
+  payloadExtra: Record<string, unknown> = {},
+): Promise<void> {
+  deletePendingChannelApproval(row.messaging_group_id);
+  await notifyApprovalResolved({
+    approval: channelHoldView(row, payloadExtra),
+    session: null,
+    outcome,
+    userId,
+  });
 }
 
 /**
@@ -422,13 +438,7 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
   // ── Reject / Cancel ──
   if (payload.value === REJECT_VALUE) {
     setMessagingGroupDeniedAt(row.messaging_group_id, new Date().toISOString());
-    deletePendingChannelApproval(row.messaging_group_id);
-    await notifyApprovalResolved({
-      approval: channelHoldView(row),
-      session: null,
-      outcome: 'reject',
-      userId: approverId,
-    });
+    await resolveChannelHold(row, 'reject', approverId);
     log.info('Channel registration denied', {
       messagingGroupId: row.messaging_group_id,
       approverId,
@@ -532,7 +542,10 @@ async function handleChannelApprovalResponse(payload: ResponsePayload): Promise<
         messagingGroupId: row.messaging_group_id,
         targetAgentGroupId,
       });
-      deletePendingChannelApproval(row.messaging_group_id);
+      await resolveChannelHold(row, 'approve', approverId, {
+        targetAgentGroupId,
+        continuationError: 'target_agent_group_missing',
+      });
       return true;
     }
     if (!hasAdminPrivilege(approverId, targetAgentGroupId)) {

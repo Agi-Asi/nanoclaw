@@ -206,7 +206,7 @@ export interface PendingQuestion {
  * src/modules/approvals/approver-rule.ts (`mayResolve`).
  */
 export type ApproverRule =
-  | { kind: 'exclusive'; approverUserId: string }
+  | { kind: 'exclusive'; approverUserId: string | null }
   | { kind: 'admins-of-scope'; agentGroupId: string | null; deliveredTo: string | null };
 
 export interface PendingApproval {

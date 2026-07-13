@@ -48,12 +48,12 @@ export function mayResolve(e: ApproverRule, clickerUserId: string | null): boole
 export function approverRuleOf(
   approval: Pick<PendingApproval, 'approver_rule' | 'approver_user_id' | 'agent_group_id'>,
 ): ApproverRule {
-  if (approval.approver_rule === 'exclusive' && approval.approver_user_id) {
+  if (approval.approver_rule === 'exclusive') {
     return { kind: 'exclusive', approverUserId: approval.approver_user_id };
   }
   return {
     kind: 'admins-of-scope',
     agentGroupId: approval.agent_group_id,
-    deliveredTo: approval.approver_rule === 'exclusive' ? null : approval.approver_user_id,
+    deliveredTo: approval.approver_user_id,
   };
 }

@@ -3,9 +3,9 @@ import { registerResource } from '../crud.js';
 registerResource({
   name: 'approval',
   plural: 'approvals',
-  table: 'pending_approvals',
+  table: 'approval_holds',
   description:
-    'Pending approval — in-flight approval cards waiting for an admin response. Created by requestApproval() (self-mod install_packages/add_mcp_server) and OneCLI credential approval flow. Rows are deleted after the admin approves/rejects or the request expires.',
+    'Pending approval hold — one read-only view across module, sender-admission, OneCLI credential, and channel-registration flows. Rows are removed after resolution or expiry.',
   idColumn: 'approval_id',
   columns: [
     {
@@ -16,7 +16,7 @@ registerResource({
     {
       name: 'session_id',
       type: 'string',
-      description: 'Session that requested the approval. Null for OneCLI credential approvals.',
+      description: 'Session that requested the approval. Null for sessionless sender, OneCLI, and channel holds.',
     },
     {
       name: 'request_id',
@@ -44,7 +44,7 @@ registerResource({
       name: 'status',
       type: 'string',
       description: 'Current status.',
-      enum: ['pending', 'approved', 'rejected', 'expired'],
+      enum: ['pending', 'approved', 'rejected', 'expired', 'awaiting_reason'],
     },
     { name: 'title', type: 'string', description: 'Card title shown to the admin.' },
     { name: 'options_json', type: 'json', description: 'Card button options as JSON array.' },

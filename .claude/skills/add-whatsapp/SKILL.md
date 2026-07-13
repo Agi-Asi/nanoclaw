@@ -7,6 +7,34 @@ description: Add WhatsApp channel via native Baileys adapter. Direct connection 
 
 Adds WhatsApp support via the native Baileys adapter (no Chat SDK bridge).
 
+## Number safety check (required)
+
+Complete this check before running any install or authentication command. If the user already said they want to use their **shared**, **personal**, **main**, **existing**, or **everyday** WhatsApp number, treat it as a shared number and show the warning immediately. Do not ask the number-type question again.
+
+Otherwise, use `AskUserQuestion`:
+
+**Which WhatsApp number will NanoClaw use?**
+
+- **Dedicated number (Recommended)** — a separate number used only for NanoClaw
+- **Shared / personal number** — the user's existing everyday WhatsApp number
+
+Remember the answer as `NUMBER_MODE` for the rest of this workflow.
+
+If `NUMBER_MODE=shared`, show this warning exactly:
+
+> ⚠️ **Risk to your WhatsApp account**
+>
+> Connecting your shared or personal number could cause WhatsApp to temporarily suspend or permanently ban that number. You could lose access to the WhatsApp account, chats, and groups you rely on.
+>
+> We strongly recommend using a separate, dedicated number for NanoClaw.
+
+Then use `AskUserQuestion`:
+
+- **Go back and use a dedicated number (Recommended)**
+- **I understand the risk — continue with my shared number**
+
+Do not continue with installation or authentication unless the user explicitly selects the second option. If they choose a dedicated number, set `NUMBER_MODE=dedicated` and continue without showing the warning again.
+
 ## Install
 
 NanoClaw doesn't ship channels in trunk. This skill copies the native WhatsApp (Baileys) adapter and its `whatsapp-auth` setup step in from the `channels` branch. No Chat SDK bridge.
@@ -92,7 +120,7 @@ WhatsApp uses linked-device authentication — no API key, just a one-time pairi
 
 ### Check current state
 
-Check if WhatsApp is already authenticated. If `store/auth/creds.json` exists, skip to "Dedicated vs personal number".
+Check if WhatsApp is already authenticated. The number safety check above is still required even when credentials already exist. If `store/auth/creds.json` exists, skip to "Dedicated vs personal number" after completing the safety check.
 
 ```bash
 test -f store/auth/creds.json && echo "WhatsApp auth exists" || echo "No WhatsApp auth"
@@ -209,9 +237,7 @@ The adapter behaves fundamentally differently depending on whether the linked nu
 - **Shared/personal number** (`ASSISTANT_HAS_OWN_NUMBER` unset or not `true`) — DMs to this number and group @-tags of it address the *human*, not the bot. The adapter never emits a mention signal (`mentions: 'never'` in its declared channel defaults), so: no stranger DM ever auto-creates a messaging group or raises an admin approval card; group wirings default to a name pattern (`\b<AgentName>\b`) instead of platform mentions; auto-created chats default to `unknown_sender_policy: 'strict'`; outbound messages are prefixed with the assistant's name.
 - **Dedicated number** (`ASSISTANT_HAS_OWN_NUMBER=true`) — everything sent to the number is for the bot. DMs and group mentions carry a real mention signal (`mentions: 'platform'`), unknown senders escalate via `request_approval` approval cards, and card-approved groups wire with `engage_mode: 'mention'`. No name prefix on outbound.
 
-AskUserQuestion: Is this a shared phone number (personal WhatsApp) or a dedicated number?
-- **Shared number** — your personal WhatsApp (bot prefixes messages with its name)
-- **Dedicated number** — a separate phone/SIM for the assistant
+Use the `NUMBER_MODE` selected in the required safety check. If information discovered later contradicts that selection, ask again before changing modes; switching to shared requires the same warning and explicit acknowledgement.
 
 Write the answer to `.env` **explicitly in both cases** (don't rely on the inference rule for new installs):
 
@@ -224,7 +250,7 @@ ASSISTANT_HAS_OWN_NUMBER=false
 
 ### Update path: existing install, flag unset
 
-If WhatsApp auth already exists (`store/auth/creds.json` present) but `.env` has no `ASSISTANT_HAS_OWN_NUMBER` line, the install predates the explicit switch. Ask the operator which mode applies and write it explicitly.
+If WhatsApp auth already exists (`store/auth/creds.json` present) but `.env` has no `ASSISTANT_HAS_OWN_NUMBER` line, the install predates the explicit switch. Use the mode established by the required safety check and write it explicitly.
 
 Suggest a default by comparing the authed number against the wired DM chat:
 

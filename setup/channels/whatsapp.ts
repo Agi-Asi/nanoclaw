@@ -6,8 +6,8 @@
  *
  *   1. Ask whether the agent gets a dedicated number or shares the
  *      operator's personal one. Personal ⇒ interception screen that spells
- *      out self-chat-only mode and steers toward alternatives (default is
- *      back to channel selection)
+ *      out the account-ban risk and self-chat-only mode (default is switching
+ *      to a dedicated number)
  *   2. Ask how to authenticate (QR code in terminal, default, or pairing code)
  *   3. If pairing-code: collect the phone number
  *   4. Install the adapter + Baileys + QR + pino via setup/add-whatsapp.sh
@@ -68,7 +68,7 @@ export async function runWhatsAppChannel(displayName: string): Promise<ChannelFl
   let mode: 'dedicated' | 'shared' = ownership;
   if (mode === 'shared') {
     const proceed = await confirmSharedNumber();
-    if (proceed === 'back') return BACK_TO_CHANNEL_SELECTION;
+    if (proceed === 'dedicated') mode = 'dedicated';
   }
 
   const method = await askAuthMethod();
@@ -121,7 +121,7 @@ export async function runWhatsAppChannel(displayName: string): Promise<ChannelFl
       // Chatting from the bot's own number IS the shared-number setup —
       // route through the same interception screen as the up-front pick.
       const proceed = await confirmSharedNumber();
-      if (proceed === 'back') return BACK_TO_CHANNEL_SELECTION;
+      if (proceed === 'dedicated') return BACK_TO_CHANNEL_SELECTION;
       mode = 'shared';
     }
   }
@@ -221,13 +221,19 @@ async function askNumberOwnership(): Promise<'dedicated' | 'shared' | 'back'> {
 }
 
 /**
- * Interception screen for the shared-number path: make the self-chat-only
- * tradeoff explicit and steer toward alternatives before any install or
- * auth happens. Default is bailing back to channel selection.
+ * Interception screen for the shared-number path: make the account-ban risk
+ * and self-chat-only tradeoff explicit before any install or auth happens.
+ * Default is switching to a dedicated number.
  */
-async function confirmSharedNumber(): Promise<'continue' | 'back'> {
+async function confirmSharedNumber(): Promise<'continue' | 'dedicated'> {
   note(
     [
+      'Connecting your shared or personal number could cause WhatsApp to',
+      'temporarily suspend or permanently ban that number. You could lose access',
+      'to the WhatsApp account, chats, and groups you rely on.',
+      '',
+      'We strongly recommend using a separate, dedicated number for NanoClaw.',
+      '',
       'On your personal number, the agent lives only in your "You" / self-chat.',
       'Messages other people send you are ignored entirely — never read, never',
       'answered, never flagged for approval. Nobody else can talk to the agent.',
@@ -238,19 +244,29 @@ async function confirmSharedNumber(): Promise<'continue' | 'back'> {
       `  • ${brandBold('a dedicated WhatsApp number')} — spare SIM, eSIM, or old phone`,
       `  • ${brandBold('/add-whatsapp-cloud')} — the official Meta Business API`,
     ].join('\n'),
-    'Personal number = self-chat only',
+    'Risk to your WhatsApp account',
   );
   const choice = ensureAnswer(
     await brightSelect({
       message: 'How would you like to proceed?',
       options: [
-        { value: 'back', label: '← Pick a different channel' },
-        { value: 'continue', label: 'Continue — self-chat only' },
+        {
+          value: 'dedicated',
+          label: 'Go back and use a dedicated number',
+          hint: 'recommended',
+        },
+        {
+          value: 'continue',
+          label: 'I understand the risk — continue with my shared number',
+        },
       ],
-      initialValue: 'back',
+      initialValue: 'dedicated',
     }),
-  ) as 'continue' | 'back';
+  ) as 'continue' | 'dedicated';
   setupLog.userInput('whatsapp_shared_confirm', choice);
+  if (choice === 'continue') {
+    setupLog.userInput('whatsapp_shared_risk_acknowledged', 'true');
+  }
   return choice;
 }
 

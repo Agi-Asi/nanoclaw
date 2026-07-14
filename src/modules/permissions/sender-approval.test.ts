@@ -174,6 +174,11 @@ async function senderHoldCount(): Promise<number> {
   ).c;
 }
 
+async function senderDetailCount(): Promise<number> {
+  const { getDb } = await import('../../db/connection.js');
+  return (getDb().prepare('SELECT COUNT(*) AS c FROM pending_sender_approval_details').get() as { c: number }).c;
+}
+
 describe('unknown-sender request_approval flow', () => {
   it('delivers an approval card on first unknown message', async () => {
     const { routeInbound } = await import('../../router.js');
@@ -196,6 +201,7 @@ describe('unknown-sender request_approval flow', () => {
 
     const { getDb } = await import('../../db/connection.js');
     const rows = getDb().prepare("SELECT * FROM pending_approvals WHERE action = 'sender_admit'").all() as Array<{
+      approval_id: string;
       session_id: string | null;
       agent_group_id: string;
       approver_rule: string;
@@ -210,6 +216,29 @@ describe('unknown-sender request_approval flow', () => {
     expect(rows[0].approver_rule).toBe('admins-of-scope');
     expect(rows[0].approver_user_id).toBe('telegram:owner');
     expect(rows[0].dedup_key).toBe('sender_admit:mg-chat:tg:stranger');
+
+    const detail = getDb()
+      .prepare(
+        `SELECT approval_id, messaging_group_id, sender_identity, sender_name, original_message
+           FROM pending_sender_approval_details`,
+      )
+      .get() as {
+      approval_id: string;
+      messaging_group_id: string;
+      sender_identity: string;
+      sender_name: string | null;
+      original_message: string;
+    };
+    expect(detail).toMatchObject({
+      approval_id: rows[0].approval_id,
+      messaging_group_id: 'mg-chat',
+      sender_identity: 'tg:stranger',
+      sender_name: 'Stranger',
+    });
+    expect(JSON.parse(detail.original_message)).toMatchObject({
+      channelType: 'telegram',
+      platformId: 'chat-123',
+    });
   });
 
   it('dedups a second message from the same stranger while pending', async () => {
@@ -235,6 +264,11 @@ describe('unknown-sender request_approval flow', () => {
     const pending = await pendingSenderHold();
     expect(pending).toBeDefined();
 
+    // The continuation reads the structured detail row. The master payload
+    // remains an audit snapshot, not the sender flow's query interface.
+    const { getDb } = await import('../../db/connection.js');
+    getDb().prepare("UPDATE pending_approvals SET payload = '{}' WHERE approval_id = ?").run(pending!.approval_id);
+
     // Fire the approve click through the response-handler chain.
     for (const handler of getResponseHandlers()) {
       const claimed = await handler({
@@ -252,7 +286,6 @@ describe('unknown-sender request_approval flow', () => {
     }
 
     // Member row added for the stranger against the wired agent group.
-    const { getDb } = await import('../../db/connection.js');
     const member = getDb()
       .prepare('SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')
       .get('tg:stranger', 'ag-1');
@@ -260,6 +293,7 @@ describe('unknown-sender request_approval flow', () => {
 
     // Pending hold cleared.
     expect(await senderHoldCount()).toBe(0);
+    expect(await senderDetailCount()).toBe(0);
 
     // Message replayed + container woken.
     expect(wakeContainer).toHaveBeenCalled();
@@ -288,6 +322,7 @@ describe('unknown-sender request_approval flow', () => {
     }
 
     expect(await senderHoldCount()).toBe(0);
+    expect(await senderDetailCount()).toBe(0);
     const { getDb } = await import('../../db/connection.js');
     const member = getDb()
       .prepare('SELECT 1 AS x FROM agent_group_members WHERE user_id = ? AND agent_group_id = ?')

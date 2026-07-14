@@ -49,6 +49,7 @@ import {
   requestChannelApproval,
 } from './channel-approval.js';
 import { addMember } from './db/agent-group-members.js';
+import { getPendingSenderApprovalDetail } from './db/pending-sender-approval-details.js';
 import {
   deletePendingChannelApproval,
   getPendingChannelApproval,
@@ -108,7 +109,7 @@ function extractAndUpsertUser(event: InboundEvent): string | null {
   return userId;
 }
 
-function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {
+function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string; senderName?: string } {
   try {
     return JSON.parse(raw);
   } catch {
@@ -124,7 +125,7 @@ function handleUnknownSender(
   event: InboundEvent,
 ): void {
   const parsed = safeParseContent(event.message.content);
-  const senderName = parsed.sender ?? null;
+  const senderName = parsed.senderName ?? parsed.sender ?? (userId ? getUser(userId)?.display_name : null) ?? null;
   const dropRecord = {
     channel_type: event.channelType,
     platform_id: event.platformId,
@@ -230,14 +231,40 @@ setSenderScopeGate(
  * response handler (mayResolve + finalizeReject). Deny just drops the hold —
  * no "deny list"; a future message re-triggers a fresh card.
  */
-registerApprovalHandler(SENDER_ADMIT_ACTION, async ({ payload, userId }) => {
-  const senderIdentity = typeof payload.senderIdentity === 'string' ? payload.senderIdentity : '';
-  const agentGroupId = typeof payload.agentGroupId === 'string' ? payload.agentGroupId : '';
-  const messagingGroupId = typeof payload.messagingGroupId === 'string' ? payload.messagingGroupId : '';
-  if (!senderIdentity || !agentGroupId) {
-    log.warn('sender_admit approved but the hold payload was malformed', { senderIdentity, agentGroupId });
+registerApprovalHandler(SENDER_ADMIT_ACTION, async ({ approval, userId }) => {
+  const detail = getPendingSenderApprovalDetail(approval.approval_id);
+  const agentGroupId = approval.agent_group_id ?? '';
+  if (!detail || !agentGroupId) {
+    log.warn('sender_admit approved but its master/detail record was incomplete', {
+      approvalId: approval.approval_id,
+      hasDetail: detail !== undefined,
+      agentGroupId,
+    });
     return;
   }
+
+  const { sender_identity: senderIdentity, messaging_group_id: messagingGroupId } = detail;
+  let parsedEvent: unknown;
+  try {
+    parsedEvent = JSON.parse(detail.original_message);
+  } catch (err) {
+    log.warn('sender_admit approved but its stored event was malformed', {
+      approvalId: approval.approval_id,
+      senderIdentity,
+      agentGroupId,
+      err,
+    });
+    return;
+  }
+  if (!isInboundEvent(parsedEvent)) {
+    log.warn('sender_admit approved but its stored event had an invalid shape', {
+      approvalId: approval.approval_id,
+      senderIdentity,
+      agentGroupId,
+    });
+    return;
+  }
+  const event = parsedEvent;
 
   addMember({
     user_id: senderIdentity,
@@ -251,17 +278,36 @@ registerApprovalHandler(SENDER_ADMIT_ACTION, async ({ payload, userId }) => {
   // replay re-fans-out the original event, and any OTHER agent group on this
   // messaging group must be free to mint its own sender card — the shared
   // dedup key would suppress it while this now-resolved row still exists.
-  if (messagingGroupId) {
-    const hold = getPendingApprovalByDedupKey(senderAdmitDedupKey(messagingGroupId, senderIdentity));
-    if (hold) deletePendingApproval(hold.approval_id);
-  }
+  const hold = getPendingApprovalByDedupKey(senderAdmitDedupKey(messagingGroupId, senderIdentity));
+  if (hold) deletePendingApproval(hold.approval_id);
 
   try {
-    await routeInbound(payload.event as InboundEvent);
+    await routeInbound(event);
   } catch (err) {
     log.error('Failed to replay message after sender approval', { senderIdentity, agentGroupId, err });
   }
 });
+
+function isInboundEvent(value: unknown): value is InboundEvent {
+  if (typeof value !== 'object' || value === null) return false;
+  const event = value as Record<string, unknown>;
+  if (
+    typeof event.channelType !== 'string' ||
+    typeof event.platformId !== 'string' ||
+    (event.threadId !== null && typeof event.threadId !== 'string') ||
+    typeof event.message !== 'object' ||
+    event.message === null
+  ) {
+    return false;
+  }
+  const message = event.message as Record<string, unknown>;
+  return (
+    typeof message.id === 'string' &&
+    (message.kind === 'chat' || message.kind === 'chat-sdk') &&
+    typeof message.content === 'string' &&
+    typeof message.timestamp === 'string'
+  );
+}
 
 // ── Unknown-channel registration flow ──
 

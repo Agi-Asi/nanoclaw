@@ -23,6 +23,7 @@
  */
 import { normalizeOptions, type RawOption } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
+import { getDb } from '../../db/connection.js';
 import {
   createPendingApproval,
   deletePendingApproval,
@@ -302,6 +303,13 @@ export interface RequestApprovalOptions {
   recordDeliveredApprover?: boolean;
   /** Channel preference for the approver-DM walk when there is no session to derive it from. */
   originChannelType?: string;
+  /**
+   * Persist action-specific detail keyed by the generated approval ID. This
+   * callback runs synchronously in the same central-DB transaction as the
+   * pending_approvals insert; throwing rolls both writes back and no card is
+   * delivered. Keep this to persistence only — no async work or side effects.
+   */
+  persistDetails?: (approvalId: string) => void;
 }
 
 /**
@@ -343,20 +351,32 @@ export async function requestApproval(opts: RequestApprovalOptions): Promise<voi
 
   const approvalId = `appr-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const cardOptions = opts.options ?? APPROVAL_OPTIONS;
-  const inserted = createPendingApproval({
-    approval_id: approvalId,
-    session_id: session?.id ?? null,
-    request_id: approvalId,
-    action,
-    payload: JSON.stringify(payload),
-    created_at: new Date().toISOString(),
-    agent_group_id: agentGroupId,
-    title,
-    options_json: JSON.stringify(normalizeOptions(cardOptions)),
-    approver_user_id: approverUserId ?? (opts.recordDeliveredApprover ? target.userId : null),
-    approver_rule: approverUserId ? 'exclusive' : 'admins-of-scope',
-    dedup_key: dedupKey ?? null,
-  });
+  let inserted: boolean;
+  try {
+    inserted = getDb().transaction(() => {
+      const created = createPendingApproval({
+        approval_id: approvalId,
+        session_id: session?.id ?? null,
+        request_id: approvalId,
+        action,
+        payload: JSON.stringify(payload),
+        created_at: new Date().toISOString(),
+        agent_group_id: agentGroupId,
+        title,
+        options_json: JSON.stringify(normalizeOptions(cardOptions)),
+        approver_user_id: approverUserId ?? (opts.recordDeliveredApprover ? target.userId : null),
+        approver_rule: approverUserId ? 'exclusive' : 'admins-of-scope',
+        dedup_key: dedupKey ?? null,
+      });
+      if (created) opts.persistDetails?.(approvalId);
+      return created;
+    })();
+    // eslint-disable-next-line no-catch-all/no-catch-all -- persistence failure is reported to the requester and must not crash the host
+  } catch (err) {
+    log.error('Failed to persist approval request', { action, approvalId, err });
+    fail('could not persist approval request.');
+    return;
+  }
   if (!inserted) {
     // A concurrent request with the same dedup key won the partial UNIQUE —
     // this insert was dropped, so don't announce or deliver a second card.

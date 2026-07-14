@@ -32,6 +32,21 @@ registerResource({
     { name: 'payload', type: 'json', description: 'JSON payload carried through to the approval handler.' },
     { name: 'created_at', type: 'string', description: 'Auto-set.' },
     { name: 'agent_group_id', type: 'string', description: 'Originating agent group.' },
+    {
+      name: 'messaging_group_id',
+      type: 'string',
+      description: 'Chat/channel the held action concerns (sender admission and channel registration).',
+    },
+    {
+      name: 'subject_user_id',
+      type: 'string',
+      description: 'User the held action concerns (sender admission).',
+    },
+    {
+      name: 'subject_name',
+      type: 'string',
+      description: 'Display name of the user the held action concerns, when known.',
+    },
     { name: 'channel_type', type: 'string', description: 'Channel the approval card was delivered on.' },
     { name: 'platform_id', type: 'string', description: 'Platform chat ID the card was delivered to.' },
     {

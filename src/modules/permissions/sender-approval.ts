@@ -14,6 +14,8 @@
  *   - the hold is sessionless: there is no agent session to notify, so
  *     failure modes (no approver, no reachable DM, no adapter) log and leave
  *     no row, letting a future attempt retry.
+ *   - sender-specific query/continuation fields live in a one-to-one detail
+ *     row created atomically with the common lifecycle master.
  *
  * On approve: the 'sender_admit' handler in index.ts adds an
  * agent_group_members row for the sender and re-invokes routeInbound with the
@@ -25,6 +27,7 @@ import type { RawOption } from '../../channels/ask-question.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import type { InboundEvent } from '../../channels/adapter.js';
 import { requestApproval } from '../approvals/primitive.js';
+import { createPendingSenderApprovalDetail } from './db/pending-sender-approval-details.js';
 
 const APPROVAL_OPTIONS: RawOption[] = [
   { label: 'Allow', selectedLabel: '✅ Allowed', value: 'approve', style: 'primary' },
@@ -63,5 +66,13 @@ export async function requestSenderApproval(input: RequestSenderApprovalInput): 
     dedupKey: senderAdmitDedupKey(messagingGroupId, senderIdentity),
     recordDeliveredApprover: true,
     originChannelType: originMg?.channel_type ?? '',
+    persistDetails: (approvalId) =>
+      createPendingSenderApprovalDetail({
+        approval_id: approvalId,
+        messaging_group_id: messagingGroupId,
+        sender_identity: senderIdentity,
+        sender_name: senderName,
+        original_message: JSON.stringify(event),
+      }),
   });
 }

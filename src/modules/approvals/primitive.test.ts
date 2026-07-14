@@ -105,6 +105,32 @@ function lastNotifyText(): string | undefined {
 }
 
 describe('requestApproval delivery failure', () => {
+  it('rolls back the master row when action-specific detail persistence fails', async () => {
+    const deliver = vi.fn().mockResolvedValue('pm-1');
+    const requested: string[] = [];
+    registerApprovalRequestedHandler(({ approval }) => {
+      if (approval.action === 'test_detail_failure') requested.push(approval.approval_id);
+    });
+    setDeliveryAdapter({ deliver });
+
+    await requestApproval({
+      session,
+      agentName: 'Agent',
+      action: 'test_detail_failure',
+      payload: { key: 'value' },
+      title: 'Test Approval',
+      question: 'Approve the thing?',
+      persistDetails: () => {
+        throw new Error('detail insert failed');
+      },
+    });
+
+    expect(getPendingApprovalsByAction('test_detail_failure')).toHaveLength(0);
+    expect(deliver).not.toHaveBeenCalled();
+    expect(requested).toHaveLength(0);
+    expect(lastNotifyText()).toMatch(/test_detail_failure failed: could not persist approval request/);
+  });
+
   it('removes the pending approval row and notifies the agent when delivery throws', async () => {
     const requested: string[] = [];
     registerApprovalRequestedHandler(({ approval }) => {

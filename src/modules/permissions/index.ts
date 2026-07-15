@@ -18,7 +18,6 @@
 import { recordDroppedMessage } from '../../db/dropped-messages.js';
 import { getAgentGroup, getAllAgentGroups } from '../../db/agent-groups.js';
 import { createMessagingGroupAgent, getMessagingGroup, setMessagingGroupDeniedAt } from '../../db/messaging-groups.js';
-import { deletePendingApproval, getPendingApprovalByDedupKey } from '../../db/sessions.js';
 import { resolveWiringDefaults } from '../../channels/channel-defaults.js';
 import {
   routeInbound,
@@ -34,31 +33,28 @@ import { registerResponseHandler, type ResponsePayload } from '../../response-re
 import { getDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
 import type { MessagingGroup, MessagingGroupAgent } from '../../types.js';
-import { notifyApprovalResolved, registerApprovalHandler } from '../approvals/primitive.js';
 import { guard } from '../../guard/index.js';
 import { channelsRegister, sendersAdmit } from './guard.js';
 import { canAccessAgentGroup } from './access.js';
 import {
   buildAgentSelectionOptions,
-  channelHoldView,
   CHOOSE_EXISTING_VALUE,
   CONNECT_PREFIX,
   createNewAgentGroup,
   NEW_AGENT_VALUE,
   REJECT_VALUE,
   requestChannelApproval,
+  resolveChannelHold,
 } from './channel-approval.js';
 import { addMember } from './db/agent-group-members.js';
-import { getPendingSenderApprovalDetail } from './db/pending-sender-approval-details.js';
 import {
-  deletePendingChannelApproval,
   getPendingChannelApproval,
   updatePendingChannelApprovalCard,
   type PendingChannelApproval,
 } from './db/pending-channel-approvals.js';
 import { hasAdminPrivilege } from './db/user-roles.js';
 import { getUser, upsertUser } from './db/users.js';
-import { requestSenderApproval, senderAdmitDedupKey, SENDER_ADMIT_ACTION } from './sender-approval.js';
+import { registerSenderApprovalContinuation, requestSenderApproval } from './sender-approval.js';
 import { ensureUserDm } from './user-dm.js';
 
 // ── Free-text name input state ──
@@ -221,93 +217,7 @@ setSenderScopeGate(
   },
 );
 
-/**
- * Approve continuation for the unknown-sender hold (a sessionless
- * pending_approvals row created by sender-approval.ts): add the sender to
- * agent_group_members and re-invoke routeInbound with the stored event — the
- * second routing attempt clears the gate because the user is now a member.
- *
- * Click authorization and the deny path are the approvals module's shared
- * response handler (mayResolve + finalizeReject). Deny just drops the hold —
- * no "deny list"; a future message re-triggers a fresh card.
- */
-registerApprovalHandler(SENDER_ADMIT_ACTION, async ({ approval, userId }) => {
-  const detail = getPendingSenderApprovalDetail(approval.approval_id);
-  const agentGroupId = approval.agent_group_id ?? '';
-  if (!detail || !agentGroupId) {
-    log.warn('sender_admit approved but its master/detail record was incomplete', {
-      approvalId: approval.approval_id,
-      hasDetail: detail !== undefined,
-      agentGroupId,
-    });
-    return;
-  }
-
-  const { sender_identity: senderIdentity, messaging_group_id: messagingGroupId } = detail;
-  let parsedEvent: unknown;
-  try {
-    parsedEvent = JSON.parse(detail.original_message);
-  } catch (err) {
-    log.warn('sender_admit approved but its stored event was malformed', {
-      approvalId: approval.approval_id,
-      senderIdentity,
-      agentGroupId,
-      err,
-    });
-    return;
-  }
-  if (!isInboundEvent(parsedEvent)) {
-    log.warn('sender_admit approved but its stored event had an invalid shape', {
-      approvalId: approval.approval_id,
-      senderIdentity,
-      agentGroupId,
-    });
-    return;
-  }
-  const event = parsedEvent;
-
-  addMember({
-    user_id: senderIdentity,
-    agent_group_id: agentGroupId,
-    added_by: userId,
-    added_at: new Date().toISOString(),
-  });
-  log.info('Unknown sender approved — member added', { senderIdentity, agentGroupId, approverId: userId });
-
-  // Delete the hold BEFORE re-routing (the pre-fold table did the same). The
-  // replay re-fans-out the original event, and any OTHER agent group on this
-  // messaging group must be free to mint its own sender card — the shared
-  // dedup key would suppress it while this now-resolved row still exists.
-  const hold = getPendingApprovalByDedupKey(senderAdmitDedupKey(messagingGroupId, senderIdentity));
-  if (hold) deletePendingApproval(hold.approval_id);
-
-  try {
-    await routeInbound(event);
-  } catch (err) {
-    log.error('Failed to replay message after sender approval', { senderIdentity, agentGroupId, err });
-  }
-});
-
-function isInboundEvent(value: unknown): value is InboundEvent {
-  if (typeof value !== 'object' || value === null) return false;
-  const event = value as Record<string, unknown>;
-  if (
-    typeof event.channelType !== 'string' ||
-    typeof event.platformId !== 'string' ||
-    (event.threadId !== null && typeof event.threadId !== 'string') ||
-    typeof event.message !== 'object' ||
-    event.message === null
-  ) {
-    return false;
-  }
-  const message = event.message as Record<string, unknown>;
-  return (
-    typeof message.id === 'string' &&
-    (message.kind === 'chat' || message.kind === 'chat-sdk') &&
-    typeof message.content === 'string' &&
-    typeof message.timestamp === 'string'
-  );
-}
+registerSenderApprovalContinuation(routeInbound);
 
 // ── Unknown-channel registration flow ──
 
@@ -421,22 +331,6 @@ async function wireApprovedChannel(
     });
   }
   return true;
-}
-
-/** Delete a channel hold and announce its terminal decision through the common lifecycle hook. */
-async function resolveChannelHold(
-  row: PendingChannelApproval,
-  outcome: 'approve' | 'reject',
-  userId: string,
-  payloadExtra: Record<string, unknown> = {},
-): Promise<void> {
-  deletePendingChannelApproval(row.messaging_group_id);
-  await notifyApprovalResolved({
-    approval: channelHoldView(row, payloadExtra),
-    session: null,
-    outcome,
-    userId,
-  });
 }
 
 /**

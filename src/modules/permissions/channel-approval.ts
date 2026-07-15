@@ -54,7 +54,12 @@ import { initGroupFilesystem } from '../../group-init.js';
 import { log } from '../../log.js';
 import type { InboundEvent } from '../../channels/adapter.js';
 import type { AgentGroup, PendingApproval } from '../../types.js';
-import { notifyApprovalRequested, pickApprovalDelivery, pickApprover } from '../approvals/primitive.js';
+import {
+  notifyApprovalRequested,
+  notifyApprovalResolved,
+  pickApprovalDelivery,
+  pickApprover,
+} from '../approvals/primitive.js';
 import {
   createPendingChannelApproval,
   deletePendingChannelApproval,
@@ -352,6 +357,22 @@ export function channelHoldView(
     approver_rule: 'admins-of-scope',
     dedup_key: null,
   };
+}
+
+/** Delete a channel hold and announce its terminal decision through the common lifecycle hook. */
+export async function resolveChannelHold(
+  row: PendingChannelApproval,
+  outcome: 'approve' | 'reject',
+  userId: string,
+  payloadExtra: Record<string, unknown> = {},
+): Promise<void> {
+  deletePendingChannelApproval(row.messaging_group_id);
+  await notifyApprovalResolved({
+    approval: channelHoldView(row, payloadExtra),
+    session: null,
+    outcome,
+    userId,
+  });
 }
 
 /**

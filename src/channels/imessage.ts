@@ -53,7 +53,13 @@ import { log } from '../log.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
-import type { ChannelAdapter, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
+import type {
+  ChannelAdapter,
+  ChannelDefaults,
+  ChannelSetup,
+  InboundMessage,
+  OutboundMessage,
+} from './adapter.js';
 // Type-only import from the baseline `chat` dep — no runtime cost, and the
 // local backend's `chat-adapter-imessage` is loaded dynamically (see the
 // factory) so this module still evaluates without that package installed.
@@ -746,6 +752,20 @@ export function createPhotonAdapter(
 // Self-registration — one `imessage` channel; the factory picks the backend
 // ---------------------------------------------------------------------------
 
+/**
+ * iMessage exposes no group-mention metadata, so mentions are DM-only (a DM is
+ * addressed to the bot by definition) and group wirings default to a
+ * name-pattern trigger ({name} = agent group name). Local runs on the
+ * operator's personal Apple ID — a shared identity where strangers DMing it
+ * reach the human, not the bot — so auto-create stays 'strict'; hosted keeps
+ * the same posture for unknown senders on the managed line.
+ */
+const IMESSAGE_DEFAULTS: ChannelDefaults = {
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'strict' },
+  group: { engageMode: 'pattern', engagePattern: '\\b{name}\\b', threads: false, unknownSenderPolicy: 'strict' },
+  mentions: 'dm-only',
+};
+
 function truthy(value: string | undefined): boolean {
   return /^(1|true|yes|on)$/i.test((value ?? '').trim());
 }
@@ -799,7 +819,12 @@ async function createLocalAdapter(): Promise<ChannelAdapter> {
   const raw = mod.createiMessageAdapter({ local: true });
   // The community adapter omits channelIdFromThreadId; polyfill an identity fn.
   const adapter = Object.assign(raw, { channelIdFromThreadId: (threadId: string) => threadId });
-  return createChatSdkBridge({ adapter, concurrency: 'concurrent', supportsThreads: false });
+  return createChatSdkBridge({
+    adapter,
+    concurrency: 'concurrent',
+    supportsThreads: false,
+    defaults: IMESSAGE_DEFAULTS,
+  });
 }
 
 registerChannelAdapter('imessage', {
@@ -851,4 +876,5 @@ registerChannelAdapter('imessage', {
       maxInlineAttachmentBytes: maxInline,
     });
   },
+  defaults: IMESSAGE_DEFAULTS,
 });

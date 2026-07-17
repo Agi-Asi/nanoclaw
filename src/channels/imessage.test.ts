@@ -21,6 +21,7 @@ import {
   photonReactionEmoji,
   photonReactionTargetId,
   phoneTargetFromSpaceId,
+  readMediaWithRetry,
   resolveSpaceIdentity,
   type NormalizedInbound,
   type PhotonAttachment,
@@ -134,7 +135,8 @@ describe('normalizeContent', () => {
   const saver = async (c: { type: string }): Promise<PhotonAttachment | null> => ({
     type: c.type,
     name: 'file.bin',
-    localPath: 'attachments/file.bin',
+    size: 2,
+    data: Buffer.from([1, 2]).toString('base64'),
   });
 
   it('extracts plain text', async () => {
@@ -171,6 +173,38 @@ describe('normalizeContent', () => {
     await normalizeContent({ type: 'reaction', emoji: '👍' }, saver, out);
     expect(out.text).toBe('reaction:added:👍');
     expect(out.isReaction).toBe(true);
+  });
+});
+
+describe('readMediaWithRetry', () => {
+  it('returns bytes on first success without retrying', async () => {
+    const read = vi.fn(async () => new Uint8Array([1, 2, 3]));
+    const bytes = await readMediaWithRetry({ type: 'attachment', read }, { baseDelayMs: 1 });
+    expect(Array.from(bytes)).toEqual([1, 2, 3]);
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a transient stream reset and succeeds', async () => {
+    // Live photos surface ECONNRESET / gRPC RST_STREAM mid-transfer; a
+    // fresh read succeeds.
+    const read = vi
+      .fn<() => Promise<Uint8Array>>()
+      .mockRejectedValueOnce(Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' }))
+      .mockRejectedValueOnce(new Error('13 INTERNAL: Received RST_STREAM with code 2'))
+      .mockResolvedValueOnce(new Uint8Array([7]));
+    const bytes = await readMediaWithRetry({ type: 'attachment', read }, { baseDelayMs: 1 });
+    expect(Array.from(bytes)).toEqual([7]);
+    expect(read).toHaveBeenCalledTimes(3);
+  });
+
+  it('throws the last error once attempts are exhausted', async () => {
+    const read = vi.fn(async (): Promise<Uint8Array> => {
+      throw new Error('read ECONNRESET');
+    });
+    await expect(readMediaWithRetry({ type: 'attachment', read }, { attempts: 3, baseDelayMs: 1 })).rejects.toThrow(
+      'ECONNRESET',
+    );
+    expect(read).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -323,6 +357,59 @@ describe('photon adapter (mocked SDK)', () => {
     expect((msg.content as { text: string }).text).toBe('hi bot');
     expect((msg.content as { senderId: string }).senderId).toBe('imessage:+15551112222');
     expect(host.metadata[0]).toEqual({ platformId: '+15551112222', isGroup: false });
+
+    await adapter.teardown();
+  });
+
+  it('delivers inbound media as base64 data for session-inbox staging', async () => {
+    const { sdk, queue } = makeFakeSdk();
+    const host = makeHostConfig();
+    const adapter = createPhotonAdapter(
+      { projectId: 'p', projectSecret: 's', markdown: true, telemetry: false, maxInlineAttachmentBytes: 1000 },
+      { loadSpectrum: async () => sdk },
+    );
+    await adapter.setup(host.config);
+
+    const space: SpectrumSpace = { id: '+15551112222', type: 'dm', phone: '+15551112222', send: async () => ({}) };
+    queue.push([
+      space,
+      {
+        id: 'm-media',
+        direction: 'inbound',
+        sender: { id: '+15551112222' },
+        content: {
+          type: 'group',
+          items: [
+            { content: { type: 'text', text: 'look at this' } },
+            {
+              content: {
+                type: 'attachment',
+                id: 'att1',
+                name: 'photo.heic',
+                mimeType: 'image/heic',
+                read: async () => new Uint8Array([9, 8, 7]),
+              },
+            },
+          ],
+        },
+      },
+    ]);
+
+    await waitFor(() => host.inbound.length === 1);
+    const content = host.inbound[0].msg.content as {
+      text: string;
+      attachments: Array<{ type: string; name: string; mimeType?: string; size: number; data: string }>;
+    };
+    expect(content.text).toBe('look at this');
+    expect(content.attachments).toHaveLength(1);
+    const att = content.attachments[0];
+    // base64 `data` (no localPath): the host stages bytes into the session
+    // inbox and rewrites the entry — the adapter must not write to disk.
+    expect(att).not.toHaveProperty('localPath');
+    expect(att.name).toBe('photo.heic');
+    expect(att.mimeType).toBe('image/heic');
+    expect(att.size).toBe(3);
+    expect(Array.from(Buffer.from(att.data, 'base64'))).toEqual([9, 8, 7]);
 
     await adapter.teardown();
   });

@@ -47,19 +47,12 @@ import os from 'os';
 import path from 'path';
 
 import { isSafeAttachmentName } from '../attachment-safety.js';
-import { DATA_DIR } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { normalizeOptions, type NormalizedOption } from './ask-question.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { createChatSdkBridge } from './chat-sdk-bridge.js';
-import type {
-  ChannelAdapter,
-  ChannelDefaults,
-  ChannelSetup,
-  InboundMessage,
-  OutboundMessage,
-} from './adapter.js';
+import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 // Type-only import from the baseline `chat` dep — no runtime cost, and the
 // local backend's `chat-adapter-imessage` is loaded dynamically (see the
 // factory) so this module still evaluates without that package installed.
@@ -187,7 +180,7 @@ export interface PhotonConfig {
   markdown: boolean;
   /** Spectrum SDK telemetry. Default false. */
   telemetry: boolean;
-  /** Cap on inbound attachment bytes we read + cache. Default 20 MB. */
+  /** Cap on inbound attachment bytes we read + inline for inbox staging. Default 20 MB. */
   maxInlineAttachmentBytes: number;
 }
 
@@ -312,11 +305,46 @@ export function chunkText(text: string, limit = OUTBOUND_TEXT_CHUNK): string[] {
   return chunks;
 }
 
-/** A downloaded inbound attachment reference. */
+/**
+ * A downloaded inbound attachment, carried as base64 `data`. The host stages
+ * the bytes into the session's inbox and rewrites the entry to a `localPath`
+ * — the adapter itself never touches disk.
+ */
 export interface PhotonAttachment {
   type: string;
   name: string;
-  localPath: string;
+  mimeType?: string;
+  size: number;
+  data: string;
+}
+
+const MEDIA_READ_ATTEMPTS = 3;
+const MEDIA_READ_RETRY_BASE_MS = 500;
+
+/**
+ * Read a media node's bytes, retrying transient stream failures. Large reads
+ * (live photos especially) can die mid-transfer with ECONNRESET / gRPC
+ * RST_STREAM; a fresh read usually succeeds. Exported for unit testing.
+ */
+export async function readMediaWithRetry(
+  content: SpectrumContent,
+  opts: { attempts?: number; baseDelayMs?: number } = {},
+): Promise<Uint8Array> {
+  const attempts = opts.attempts ?? MEDIA_READ_ATTEMPTS;
+  const baseDelayMs = opts.baseDelayMs ?? MEDIA_READ_RETRY_BASE_MS;
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await content.read!();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < attempts) {
+        log.warn('Photon: attachment read failed — retrying', { type: content.type, attempt, err });
+        await new Promise((r) => setTimeout(r, baseDelayMs * attempt));
+      }
+    }
+  }
+  throw lastErr;
 }
 
 /** Extracted, normalized inbound payload built from a Spectrum message. */
@@ -329,12 +357,12 @@ export interface NormalizedInbound {
 
 /**
  * Walk a Spectrum content node into agent-visible text + downloaded
- * attachments. `saveMedia` is injected (the adapter caches to disk; tests
- * stub it) and receives the raw bytes + a chosen filename.
+ * attachments. `readMedia` is injected (the adapter reads bytes into base64;
+ * tests stub it) and returns the payload the host stages into the inbox.
  */
 export async function normalizeContent(
   content: SpectrumContent | undefined,
-  saveMedia: (content: SpectrumContent) => Promise<PhotonAttachment | null>,
+  readMedia: (content: SpectrumContent) => Promise<PhotonAttachment | null>,
   out: NormalizedInbound,
 ): Promise<void> {
   if (!content || typeof content !== 'object') return;
@@ -343,14 +371,14 @@ export async function normalizeContent(
     return;
   }
   if (content.type === 'attachment' || content.type === 'voice') {
-    const saved = await saveMedia(content);
+    const saved = await readMedia(content);
     if (saved) out.attachments.push(saved);
     else out.failures.push(content.type === 'voice' ? 'voice message' : 'attachment');
     return;
   }
   if (content.type === 'group') {
     for (const item of content.items ?? []) {
-      await normalizeContent(item?.content, saveMedia, out);
+      await normalizeContent(item?.content, readMedia, out);
     }
     return;
   }
@@ -440,8 +468,13 @@ export function createPhotonAdapter(
     return space;
   }
 
-  /** Read + cache an inbound media node to DATA_DIR/attachments. */
-  async function saveMedia(content: SpectrumContent): Promise<PhotonAttachment | null> {
+  /**
+   * Read an inbound media node into a base64 payload. The adapter never
+   * writes to disk itself — the host stages `data` into the session's inbox
+   * (session-manager `extractAttachmentFiles`) and rewrites it to a
+   * `localPath` the container can read.
+   */
+  async function readMedia(content: SpectrumContent): Promise<PhotonAttachment | null> {
     if (typeof content.read !== 'function') return null;
     if (typeof content.size === 'number' && content.size > config.maxInlineAttachmentBytes) {
       log.warn('Photon: inbound attachment over inline cap, skipping', {
@@ -452,9 +485,9 @@ export function createPhotonAdapter(
     }
     let bytes: Uint8Array;
     try {
-      bytes = await content.read();
+      bytes = await readMediaWithRetry(content);
     } catch (err) {
-      log.warn('Photon: failed to read inbound attachment bytes', { err });
+      log.warn('Photon: failed to read inbound attachment bytes', { type: content.type, err });
       return null;
     }
     if (bytes.length > config.maxInlineAttachmentBytes) {
@@ -462,19 +495,13 @@ export function createPhotonAdapter(
       return null;
     }
     const filename = attachmentFilename(content);
-    try {
-      const attachDir = path.join(DATA_DIR, 'attachments');
-      fs.mkdirSync(attachDir, { recursive: true });
-      fs.writeFileSync(path.join(attachDir, filename), Buffer.from(bytes));
-    } catch (err) {
-      log.warn('Photon: failed to write inbound attachment', { filename, err });
-      return null;
-    }
-    log.info('Photon: media downloaded', { type: content.type, filename });
+    log.info('Photon: media received', { type: content.type, filename, size: bytes.length });
     return {
       type: content.type === 'voice' ? 'voice' : 'attachment',
       name: filename,
-      localPath: `attachments/${filename}`,
+      ...(content.mimeType ? { mimeType: content.mimeType } : {}),
+      size: bytes.length,
+      data: Buffer.from(bytes).toString('base64'),
     };
   }
 
@@ -502,7 +529,7 @@ export function createPhotonAdapter(
     }
 
     const out: NormalizedInbound = { text: '', attachments: [], failures: [], isReaction: false };
-    await normalizeContent(message.content, saveMedia, out);
+    await normalizeContent(message.content, readMedia, out);
     const text = appendMediaFailureNote(out.text, out.failures);
 
     // Nothing usable (empty protocol frame, unsupported content) — drop.

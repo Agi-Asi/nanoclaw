@@ -8,6 +8,9 @@
  *     delivery, and teardown all run the production code paths without a live
  *     Photon account.
  */
+import fs from 'fs';
+import path from 'path';
+
 import { describe, it, expect, vi } from 'vitest';
 
 import type { ChannelSetup, InboundMessage } from './adapter.js';
@@ -691,5 +694,68 @@ describe('photon adapter (mocked SDK)', () => {
     await adapter.teardown();
     expect(stop).toHaveBeenCalled();
     expect(adapter.isConnected()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Real-SDK integration
+// ---------------------------------------------------------------------------
+//
+// The mocked-SDK tests above exercise handwritten structural typings, which
+// can silently drift from the real package. This block imports the actually
+// installed `spectrum-ts` and asserts every part of the surface the adapter
+// consumes. It runs wherever /add-imessage (hosted) has installed the pin —
+// including the upgrade flow's `vitest run src/channels/imessage.test.ts` —
+// and skips on checkouts without the package (it is deliberately not a
+// dependency of this branch).
+
+let realSpectrum: Record<string, unknown> | null = null;
+let realProvider: Record<string, unknown> | null = null;
+try {
+  const spectrumSpec: string = 'spectrum-ts';
+  const imessageSpec: string = 'spectrum-ts/providers/imessage';
+  realSpectrum = (await import(spectrumSpec)) as Record<string, unknown>;
+  realProvider = (await import(imessageSpec)) as Record<string, unknown>;
+} catch {
+  // Package not installed — integration block skips below.
+}
+
+describe.skipIf(!realSpectrum)('spectrum-ts SDK integration (real pinned package)', () => {
+  it('is the major version the adapter targets (v11)', async () => {
+    const { createRequire } = await import('module');
+    const req = createRequire(import.meta.url);
+    const pkgPath = path.join(path.dirname(req.resolve('spectrum-ts')), '..', 'package.json');
+    const version = String(JSON.parse(fs.readFileSync(pkgPath, 'utf-8')).version);
+    // Keep in sync with the /add-imessage pin (spectrum-ts@11.x). v10 renamed
+    // Spectrum()'s `providers` key to `platforms`; a different major here means
+    // the adapter's structural typings need re-reconciling.
+    expect(version.split('.')[0]).toBe('11');
+  });
+
+  it('exposes every module export the adapter consumes', () => {
+    const mod = realSpectrum!;
+    for (const fn of ['Spectrum', 'text', 'markdown', 'typing', 'read', 'attachment', 'voice'] as const) {
+      expect(typeof mod[fn], `spectrum-ts export ${fn}`).toBe('function');
+    }
+  });
+
+  it('exposes the imessage provider with a callable config()', () => {
+    const imessage = realProvider!.imessage as { (app: unknown): unknown; config: () => unknown };
+    expect(typeof imessage).toBe('function');
+    expect(typeof imessage.config).toBe('function');
+    expect(imessage.config()).toBeDefined();
+  });
+
+  it('builds the outbound content the adapter sends', () => {
+    const mod = realSpectrum! as {
+      text: (s: string) => unknown;
+      markdown: (s: string) => unknown;
+      typing: (state: 'start' | 'stop') => unknown;
+    };
+    // The exact builder shapes are the SDK's business — the adapter only
+    // requires that they are constructible and land in space.send() as-is.
+    expect(mod.text('hello')).toBeDefined();
+    expect(mod.markdown('**hello**')).toBeDefined();
+    expect(mod.typing('start')).toBeDefined();
   });
 });

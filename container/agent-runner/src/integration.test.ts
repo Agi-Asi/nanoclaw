@@ -549,9 +549,7 @@ describe('poll loop — slash command during active query', () => {
   it(
     'aborts the active query when /clear arrives as a follow-up',
     async () => {
-    console.log('[abort-test] start');
     insertMessage('m-active', { sender: 'Alice', text: 'long running request' }, { platformId: 'chan-1', channelType: 'discord' });
-    console.log('[abort-test] message inserted, pending =', JSON.stringify(getPendingMessages().map((m) => m.id)));
 
     const provider = new BlockingProvider();
     const controller = new AbortController();
@@ -562,16 +560,10 @@ describe('poll loop — slash command during active query', () => {
     // ceilings cost nothing on the happy path).
     const loopPromise = runPollLoopWithTimeout(provider as unknown as MockProvider, controller.signal, 20000);
 
-    for (let i = 0; i < 20 && provider.queries === 0; i++) {
-      await new Promise((r) => setTimeout(r, 500));
-      console.log(`[abort-test] t+${(i + 1) * 500}ms queries=${provider.queries} pending=${getPendingMessages().length}`);
-    }
     await waitFor(() => provider.queries === 1, 15000);
-    console.log('[abort-test] query started');
     insertMessage('m-clear-active', { sender: 'Alice', text: '/clear' }, { platformId: 'chan-1', channelType: 'discord' });
 
     await waitFor(() => provider.aborts === 1, 15000);
-    console.log('[abort-test] aborted');
     await waitFor(
       () => getUndeliveredMessages().some((msg) => JSON.parse(msg.content).text === 'Session cleared.'),
       15000,

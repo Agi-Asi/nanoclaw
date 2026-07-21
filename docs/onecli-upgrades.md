@@ -64,6 +64,33 @@ cd ~/.onecli && ONECLI_VERSION=<old-version> docker compose up -d
 
 If the NanoClaw update itself is being rolled back, also pin `@onecli-sh/sdk` back to its previous version in `package.json` and run `pnpm install`. Vault data is unaffected in both directions.
 
+## 5. Reconcile NanoClaw security guardrails
+
+NanoClaw setup installs three global block rules for Gmail's legacy routes on
+`www.googleapis.com`. Without them, Gmail traffic can bypass a policy written
+only against the canonical `gmail.googleapis.com` host. Existing installations
+should reconcile the rules once after updating NanoClaw:
+
+```bash
+pnpm exec tsx setup/index.ts --step onecli --reuse
+onecli rules list --max 1000
+```
+
+The setup step must report `GMAIL_GUARDRAILS=verified`. The rules list must
+contain these enabled blocks:
+
+| Name                             | Host                 | Path              |
+| -------------------------------- | -------------------- | ----------------- |
+| `nanoclaw:security:gmail-legacy` | `www.googleapis.com` | `/gmail/*`        |
+| `nanoclaw:security:gmail-batch`  | `www.googleapis.com` | `/batch/gmail/*`  |
+| `nanoclaw:security:gmail-upload` | `www.googleapis.com` | `/upload/gmail/*` |
+
+The rules are deliberately path-scoped: they do not block Calendar, Drive, or
+other Google APIs on the shared legacy host. Setup is idempotent and verifies
+the rules after writing them. If a rule with one of these names already exists
+with a different shape, setup stops instead of overwriting it; inspect and
+correct that conflict in OneCLI, then rerun the command.
+
 ## The CLI binary (`onecli-cli` pin)
 
 The `onecli` host CLI is pinned the same way, under `onecli-cli` in `versions.json`. Setup installs exactly that version by direct release download — it never resolves "latest". When an update moves this pin, replace the binary with the pinned release:

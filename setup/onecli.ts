@@ -28,6 +28,130 @@ function childEnv(): NodeJS.ProcessEnv {
   return { ...process.env, PATH: parts.join(path.delimiter) };
 }
 
+export interface GmailLegacyGuardrail {
+  name: string;
+  hostPattern: string;
+  pathPattern: string;
+  action: 'block';
+  enabled: true;
+}
+
+/**
+ * Gmail's canonical API host is gmail.googleapis.com. The legacy Google API
+ * host can route the same service through these path families, so a policy
+ * authored only against the canonical host can be bypassed. Keep these rules
+ * global and narrow: Calendar and Drive also use www.googleapis.com.
+ */
+export const GMAIL_LEGACY_GUARDRAILS: readonly GmailLegacyGuardrail[] = [
+  {
+    name: 'nanoclaw:security:gmail-legacy',
+    hostPattern: 'www.googleapis.com',
+    pathPattern: '/gmail/*',
+    action: 'block',
+    enabled: true,
+  },
+  {
+    name: 'nanoclaw:security:gmail-batch',
+    hostPattern: 'www.googleapis.com',
+    pathPattern: '/batch/gmail/*',
+    action: 'block',
+    enabled: true,
+  },
+  {
+    name: 'nanoclaw:security:gmail-upload',
+    hostPattern: 'www.googleapis.com',
+    pathPattern: '/upload/gmail/*',
+    action: 'block',
+    enabled: true,
+  },
+];
+
+interface OnecliRule {
+  name?: unknown;
+  hostPattern?: unknown;
+  pathPattern?: unknown;
+  action?: unknown;
+  enabled?: unknown;
+}
+
+export type RunOnecli = (args: string[]) => string;
+
+function runOnecli(args: string[]): string {
+  return execFileSync('onecli', args, {
+    encoding: 'utf-8',
+    env: childEnv(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+function parseOnecliRules(output: string): OnecliRule[] {
+  const parsed = JSON.parse(output) as { data?: unknown } | unknown[];
+  const rows = Array.isArray(parsed) ? parsed : parsed.data;
+  if (!Array.isArray(rows)) throw new Error('OneCLI returned an invalid rules list');
+  return rows as OnecliRule[];
+}
+
+function matchesGuardrail(rule: OnecliRule, desired: GmailLegacyGuardrail): boolean {
+  return (
+    rule.name === desired.name &&
+    rule.hostPattern === desired.hostPattern &&
+    rule.pathPattern === desired.pathPattern &&
+    rule.action === desired.action &&
+    rule.enabled === desired.enabled
+  );
+}
+
+/**
+ * Reconcile the install-wide Gmail legacy-route blocks into OneCLI.
+ *
+ * Stable names make this idempotent. A same-name/different-shape rule is a
+ * hard conflict rather than something we overwrite: silently accepting a
+ * weakened security rule would reopen the bypass, while deleting a user's
+ * rule is outside NanoClaw's ownership.
+ */
+export function ensureGmailLegacyGuardrails(run: RunOnecli = runOnecli): { created: string[]; existing: string[] } {
+  const list = (): OnecliRule[] => parseOnecliRules(run(['rules', 'list', '--max', '1000']));
+  const current = list();
+  const created: string[] = [];
+  const existing: string[] = [];
+
+  for (const desired of GMAIL_LEGACY_GUARDRAILS) {
+    const named = current.find((rule) => rule.name === desired.name);
+    if (named) {
+      if (!matchesGuardrail(named, desired)) {
+        throw new Error(`OneCLI rule ${JSON.stringify(desired.name)} exists with an unexpected shape`);
+      }
+      existing.push(desired.name);
+      continue;
+    }
+
+    run([
+      'rules',
+      'create',
+      '--name',
+      desired.name,
+      '--host-pattern',
+      desired.hostPattern,
+      '--path-pattern',
+      desired.pathPattern,
+      '--action',
+      desired.action,
+      '--enabled',
+    ]);
+    created.push(desired.name);
+  }
+
+  const reconciled = list();
+  const missing = GMAIL_LEGACY_GUARDRAILS.filter(
+    (desired) => !reconciled.some((rule) => matchesGuardrail(rule, desired)),
+  );
+  if (missing.length > 0) {
+    throw new Error(`OneCLI did not persist Gmail guardrails: ${missing.map((rule) => rule.name).join(', ')}`);
+  }
+
+  return { created, existing };
+}
+
 function onecliVersion(): string | null {
   try {
     return execFileSync('onecli', ['version'], {
@@ -341,11 +465,14 @@ export async function run(args: string[]): Promise<void> {
     }
     const healthy = await pollHealth(remoteUrl, 5000);
     const v1Hint = healthy ? gatewayV1Hint(await verifyGatewayV1(remoteUrl)) : null;
+    const guardrails = ensureGmailLegacyGuardrails();
     emitStatus('ONECLI', {
       INSTALLED: true,
       REMOTE: true,
       ONECLI_URL: remoteUrl,
       HEALTHY: healthy,
+      GMAIL_GUARDRAILS: 'verified',
+      GMAIL_GUARDRAILS_CREATED: guardrails.created.length,
       STATUS: 'success',
       ...(v1Hint ? { GATEWAY_HINT: v1Hint } : {}),
       LOG: 'logs/setup.log',
@@ -382,11 +509,14 @@ export async function run(args: string[]): Promise<void> {
     log.info('Reusing existing OneCLI', { url });
     const healthy = await pollHealth(url, 5000);
     const v1Hint = healthy ? gatewayV1Hint(await verifyGatewayV1(url)) : null;
+    const guardrails = ensureGmailLegacyGuardrails();
     emitStatus('ONECLI', {
       INSTALLED: true,
       REUSED: true,
       ONECLI_URL: url,
       HEALTHY: healthy,
+      GMAIL_GUARDRAILS: 'verified',
+      GMAIL_GUARDRAILS_CREATED: guardrails.created.length,
       STATUS: 'success',
       ...(v1Hint ? { GATEWAY_HINT: v1Hint } : {}),
       LOG: 'logs/setup.log',
@@ -442,11 +572,14 @@ export async function run(args: string[]): Promise<void> {
 
   const healthy = await pollHealth(url, 15000);
   const v1Hint = healthy ? gatewayV1Hint(await verifyGatewayV1(url)) : null;
+  const guardrails = ensureGmailLegacyGuardrails();
 
   emitStatus('ONECLI', {
     INSTALLED: true,
     ONECLI_URL: url,
     HEALTHY: healthy,
+    GMAIL_GUARDRAILS: 'verified',
+    GMAIL_GUARDRAILS_CREATED: guardrails.created.length,
     // Install succeeded regardless — a failed health poll often just means
     // the endpoint is auth-gated or the gateway hasn't finished warming up.
     // The next step (auth) will surface a genuinely broken gateway via

@@ -126,6 +126,11 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
     '/app/CLAUDE.md',
     '/workspace/agent/.claude-fragments/*.md',
     '/workspace/agent/CLAUDE.local.md',
+    // Memory parity with the Claude provider: the session hook is a no-op here,
+    // so the two always-loaded memory files ride the instructions pipeline
+    // instead (same files renderMemorySection injects for Claude).
+    '/workspace/agent/memory/index.md',
+    '/workspace/agent/memory/system/definition.md',
   ];
 
   return {

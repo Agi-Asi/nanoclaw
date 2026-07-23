@@ -39,3 +39,11 @@ describe('buildOpenCodeConfig provider transport', () => {
     expect(entry.npm).toBeUndefined();
   });
 });
+
+describe('buildOpenCodeConfig instructions', () => {
+  it('loads the two always-loaded memory files for parity with Claude', () => {
+    const config = buildOpenCodeConfig({});
+    expect(config.instructions).toContain('/workspace/agent/memory/index.md');
+    expect(config.instructions).toContain('/workspace/agent/memory/system/definition.md');
+  });
+});

@@ -219,6 +219,14 @@ export class OpenCodeProvider implements AgentProvider {
     this.options = options;
   }
 
+  // OpenCode has no native session-start hook command (the Claude Agent SDK
+  // mechanism this registers). Memory reaches the OpenCode agent through the
+  // native `instructions` file pipeline in buildOpenCodeConfig instead, so
+  // this is a no-op — same as the mock provider. Param typed `unknown` so this
+  // file compiles both on the providers branch (interface predates the member)
+  // and in a main-based install (structurally satisfies the required method).
+  registerMemorySessionHook(_hook: unknown): void {}
+
   isSessionInvalid(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
     return STALE_SESSION_RE.test(msg);

@@ -83,7 +83,7 @@ function wrapPromptWithContext(text: string, systemInstructions?: string): strin
   return out;
 }
 
-function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> {
+export function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> {
   const provider = process.env.OPENCODE_PROVIDER || 'anthropic';
   const model = process.env.OPENCODE_MODEL;
   const smallModel = process.env.OPENCODE_SMALL_MODEL;
@@ -100,6 +100,11 @@ function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> 
       ? {}
       : {
           [provider]: {
+            // A custom base URL means a self-hosted OpenAI-compatible endpoint
+            // (vLLM, llama.cpp, …). The stock openai SDK package speaks the
+            // Responses API, whose multi-turn history vLLM rejects (assistant
+            // items lack id/status) — pin the Chat Completions transport.
+            ...(proxyUrl ? { npm: '@ai-sdk/openai-compatible' } : {}),
             options: { apiKey: 'placeholder', baseURL: proxyUrl },
             ...(modelsToRegister.length > 0
               ? {

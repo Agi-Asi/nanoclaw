@@ -11,6 +11,7 @@ import { createOpencodeClient as createOpencodeQuestionClient } from '@opencode-
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
+import { getAllDestinations } from '../destinations.js';
 
 function log(msg: string): void {
   console.error(`[opencode-provider] ${msg}`);
@@ -293,6 +294,66 @@ export const QUESTION_STEERING_TEXT =
   'Interactive questions are not available in this environment. Decide autonomously based on your best judgment, or use the ask_user_question MCP tool to ask the human through the chat channel.';
 
 /**
+ * Routing-discipline reminder injected on the first prompt AFTER OpenCode
+ * auto-compacts the active session. Compaction rewrites the transcript into a
+ * summary, and the delivery contract — every reply that should reach a human
+ * must be wrapped in <message to="name">…</message> blocks, which the poll-loop
+ * enforces when it dispatches the agent's final text — is exactly the kind of
+ * standing instruction a summary can quietly drop. Once it is gone, replies
+ * stop reaching anyone. Re-state it, with the live destination list, so the
+ * next turn routes correctly.
+ *
+ * OpenCode 1.4.11 (the pinned SDK) exposes no compaction-prompt /
+ * customInstructions API — the Config type has no such key and session
+ * summarization takes only providerID + modelID — so unlike the Claude
+ * provider's PreCompact hook we cannot steer the summary itself. We re-inject
+ * on the next prompt instead. Destinations are read fresh at injection time.
+ *
+ * NB: on this providers branch there is no shared buildCompactInstructions()
+ * helper to reuse (it and the task-series model it depends on land far ahead on
+ * main), so this reminder states the branch's own <message to> discipline
+ * rather than importing text that does not exist here.
+ */
+export function buildPostCompactionReminder(names: string[] = getAllDestinations().map((d) => d.name)): string {
+  const list = names.length > 0 ? names.map((n) => `\`${n}\``).join(', ') : '(none)';
+  return (
+    '<system>The conversation was just compacted into a summary. Routing instructions can be lost in ' +
+    'that summary, so as a reminder: wrap every reply you want delivered in ' +
+    '<message to="name">…</message> blocks — text outside such blocks is treated as scratchpad and is ' +
+    `NOT sent. Available destinations: ${list}.</system>`
+  );
+}
+
+/**
+ * Per-query compaction-reminder latch. `note` arms it when a
+ * `session.compacted` event names the turn's active session — the OpenCode
+ * server is shared across sessions, so an unrelated session's compaction must
+ * never arm this query's reminder. `apply` prepends the reminder to the next
+ * prompt exactly once, then disarms. `buildReminder` is injectable so tests can
+ * drive the latch without touching the destinations DB.
+ */
+export function createCompactionReminder(buildReminder: () => string = buildPostCompactionReminder): {
+  note(eventSessionId: string | undefined, activeSessionId: string | undefined): void;
+  apply(message: string): string;
+  readonly isArmed: boolean;
+} {
+  let armed = false;
+  return {
+    note(eventSessionId, activeSessionId) {
+      if (activeSessionId !== undefined && eventSessionId === activeSessionId) armed = true;
+    },
+    apply(message) {
+      if (!armed) return message;
+      armed = false;
+      return `${buildReminder()}\n\n${message}`;
+    },
+    get isArmed() {
+      return armed;
+    },
+  };
+}
+
+/**
  * Minimal shape of the `/v2` SDK surface this module needs for question
  * handling — narrowed so tests can pass a fake without pulling in the real
  * `@opencode-ai/sdk/v2` client.
@@ -386,6 +447,10 @@ export class OpenCodeProvider implements AgentProvider {
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
+    // Latch that re-injects the routing reminder on the next prompt after the
+    // active session auto-compacts (see createCompactionReminder). Per-query so
+    // it never leaks a pending reminder across independent query() calls.
+    const compaction = createCompactionReminder();
 
     const systemInstructions = input.systemContext?.instructions;
     pending.push(wrapPromptWithContext(input.prompt, systemInstructions));
@@ -540,6 +605,14 @@ export class OpenCodeProvider implements AgentProvider {
                 }
                 break;
               }
+              case 'session.compacted': {
+                // The active session was just auto-compacted; arm the routing
+                // reminder for the next prompt. Filter by sessionID like the
+                // other cases — the shared server emits this for every session.
+                const sid = (ev.properties as { sessionID?: string }).sessionID;
+                compaction.note(sid, sessionId);
+                break;
+              }
               case 'session.idle': {
                 const sid = (ev.properties as { sessionID?: string }).sessionID;
                 if (sid === sessionId) {
@@ -567,7 +640,9 @@ export class OpenCodeProvider implements AgentProvider {
 
     return {
       push: (message: string) => {
-        pending.push(wrapPromptWithContext(message, systemInstructions));
+        // If the active session compacted mid-conversation, the routing
+        // reminder rides this next prompt (once), then the latch disarms.
+        pending.push(wrapPromptWithContext(compaction.apply(message), systemInstructions));
         kick();
       },
       end: () => {

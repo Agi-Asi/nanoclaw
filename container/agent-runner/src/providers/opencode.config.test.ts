@@ -2,7 +2,14 @@ import { describe, it, expect, afterEach } from 'bun:test';
 
 import { buildOpenCodeConfig } from './opencode.js';
 
-const ENV_KEYS = ['OPENCODE_PROVIDER', 'OPENCODE_MODEL', 'OPENCODE_SMALL_MODEL', 'ANTHROPIC_BASE_URL'] as const;
+const ENV_KEYS = [
+  'OPENCODE_PROVIDER',
+  'OPENCODE_MODEL',
+  'OPENCODE_SMALL_MODEL',
+  'ANTHROPIC_BASE_URL',
+  'OPENCODE_MODEL_CONTEXT_LIMIT',
+  'OPENCODE_MODEL_OUTPUT_LIMIT',
+] as const;
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 
 afterEach(() => {
@@ -37,6 +44,32 @@ describe('buildOpenCodeConfig provider transport', () => {
     const config = buildOpenCodeConfig({});
     const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
     expect(entry.npm).toBeUndefined();
+  });
+});
+
+describe('buildOpenCodeConfig model limit', () => {
+  it('declares limit.context/output on the registered model when both env vars are set', () => {
+    process.env.OPENCODE_PROVIDER = 'openai';
+    process.env.OPENCODE_MODEL = 'openai/some/local-model';
+    process.env.ANTHROPIC_BASE_URL = 'https://inference.example.test/v1';
+    process.env.OPENCODE_MODEL_CONTEXT_LIMIT = '65536';
+    process.env.OPENCODE_MODEL_OUTPUT_LIMIT = '8192';
+    const config = buildOpenCodeConfig({});
+    const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
+    const models = entry.models as Record<string, Record<string, unknown>>;
+    expect(models['some/local-model'].limit).toEqual({ context: 65536, output: 8192 });
+  });
+
+  it('omits limit when the env vars are unset', () => {
+    process.env.OPENCODE_PROVIDER = 'openai';
+    process.env.OPENCODE_MODEL = 'openai/some/local-model';
+    process.env.ANTHROPIC_BASE_URL = 'https://inference.example.test/v1';
+    delete process.env.OPENCODE_MODEL_CONTEXT_LIMIT;
+    delete process.env.OPENCODE_MODEL_OUTPUT_LIMIT;
+    const config = buildOpenCodeConfig({});
+    const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
+    const models = entry.models as Record<string, Record<string, unknown>>;
+    expect(models['some/local-model'].limit).toBeUndefined();
   });
 });
 

@@ -37,7 +37,14 @@ registerProviderContainerConfig('opencode', (ctx) => {
     NO_PROXY: mergeNoProxy(ctx.hostEnv.NO_PROXY, '127.0.0.1,localhost'),
     no_proxy: mergeNoProxy(ctx.hostEnv.no_proxy, '127.0.0.1,localhost'),
   };
-  for (const key of ['OPENCODE_PROVIDER', 'OPENCODE_MODEL', 'OPENCODE_SMALL_MODEL', 'ANTHROPIC_BASE_URL'] as const) {
+  for (const key of [
+    'OPENCODE_PROVIDER',
+    'OPENCODE_MODEL',
+    'OPENCODE_SMALL_MODEL',
+    'ANTHROPIC_BASE_URL',
+    'OPENCODE_MODEL_CONTEXT_LIMIT',
+    'OPENCODE_MODEL_OUTPUT_LIMIT',
+  ] as const) {
     const value = ctx.hostEnv[key];
     if (value) env[key] = value;
   }

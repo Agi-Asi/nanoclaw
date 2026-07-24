@@ -95,6 +95,20 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
     .filter(Boolean)
     .filter((mid, i, a) => a.indexOf(mid as string) === i);
 
+  // OpenCode auto-compacts a session once tokens >= limit.context - maxOutputTokens.
+  // Undeclared custom models resolve limit.context to 0, which silently disables
+  // compaction and kills long sessions against a fixed-window backend (e.g. vLLM).
+  // Absent these env vars, behavior is unchanged (no `limit` key emitted).
+  const contextLimitEnv = process.env.OPENCODE_MODEL_CONTEXT_LIMIT;
+  const outputLimitEnv = process.env.OPENCODE_MODEL_OUTPUT_LIMIT;
+  const modelLimit =
+    contextLimitEnv !== undefined
+      ? {
+          context: Number(contextLimitEnv),
+          ...(outputLimitEnv !== undefined ? { output: Number(outputLimitEnv) } : {}),
+        }
+      : undefined;
+
   const providerOptions: Record<string, unknown> =
     provider === 'anthropic'
       ? {}
@@ -109,7 +123,15 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
             ...(modelsToRegister.length > 0
               ? {
                   models: Object.fromEntries(
-                    modelsToRegister.map((mid) => [mid, { id: mid, name: mid, tool_call: true }]),
+                    modelsToRegister.map((mid) => [
+                      mid,
+                      {
+                        id: mid,
+                        name: mid,
+                        tool_call: true,
+                        ...(modelLimit ? { limit: modelLimit } : {}),
+                      },
+                    ]),
                   ),
                 }
               : {}),

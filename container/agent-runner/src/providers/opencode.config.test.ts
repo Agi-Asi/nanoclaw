@@ -80,3 +80,28 @@ describe('buildOpenCodeConfig instructions', () => {
     expect(config.instructions).toContain('/workspace/agent/memory/system/definition.md');
   });
 });
+
+describe('buildOpenCodeConfig permission', () => {
+  it('pins `question` to deny deterministically instead of a wildcard string', () => {
+    const config = buildOpenCodeConfig({});
+    // A flat 'allow' string previously left `question` to OpenCode's own
+    // resolution, which produced contradictory rules (question -> deny *
+    // AND question -> allow * for the same session, observed live). An
+    // explicit object with one value per category can never produce that:
+    // there is exactly one entry for `question`, and it is not 'allow'.
+    expect(typeof config.permission).toBe('object');
+    expect(config.permission).not.toBe('allow');
+    const permission = config.permission as Record<string, unknown>;
+    expect(permission.question).toBe('deny');
+  });
+
+  it('keeps every other known permission category on allow (no capability regression)', () => {
+    const config = buildOpenCodeConfig({});
+    const permission = config.permission as Record<string, unknown>;
+    const nonQuestionKeys = Object.keys(permission).filter((k) => k !== 'question');
+    expect(nonQuestionKeys.length).toBeGreaterThan(0);
+    for (const key of nonQuestionKeys) {
+      expect(permission[key]).toBe('allow');
+    }
+  });
+});

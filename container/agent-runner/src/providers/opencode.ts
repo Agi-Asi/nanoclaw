@@ -1,6 +1,12 @@
 import { spawn, type ChildProcess } from 'child_process';
 
 import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk';
+// The root `@opencode-ai/sdk` client (pinned ^1.4.3, resolves 1.4.11 on this
+// branch) has no `.question` surface at all — reply/reject/list for the
+// interactive `question` tool only exist on the `/v2` subpath client (present
+// in both 1.4.11 and 1.4.17; verified via `npm pack` .d.ts). Import it
+// separately so the session/event client above is untouched.
+import { createOpencodeClient as createOpencodeQuestionClient } from '@opencode-ai/sdk/v2';
 
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
@@ -159,7 +165,38 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
     ...(model ? { model } : {}),
     ...(smallModel ? { small_model: smallModel } : {}),
     enabled_providers: [provider],
-    permission: 'allow',
+    // A flat `permission: 'allow'` string leaves every category — including
+    // `question`, OpenCode's built-in interactive multi-choice tool — to
+    // whatever OpenCode's own default/merge resolves it to. Server logs from
+    // a live session showed that resolution land on BOTH `question -> deny *`
+    // and `question -> allow *` for the same session: internally
+    // contradictory, and whichever rule wins last, `allow` sometimes does —
+    // and a headless container has no human to answer an interactive
+    // question, so any path that lets it fire wedges the session forever
+    // (see OpenCodeProvider's question.asked handling below for the runtime
+    // belt-and-suspenders). Enumerate every known permission category
+    // explicitly instead of relying on the wildcard string, so `question`
+    // resolves to a single deterministic value — `deny` — that can never
+    // contradict itself, while every other category keeps the prior
+    // "allow everything" behavior.
+    permission: {
+      read: 'allow',
+      edit: 'allow',
+      glob: 'allow',
+      grep: 'allow',
+      list: 'allow',
+      bash: 'allow',
+      task: 'allow',
+      external_directory: 'allow',
+      todowrite: 'allow',
+      question: 'deny',
+      webfetch: 'allow',
+      websearch: 'allow',
+      codesearch: 'allow',
+      lsp: 'allow',
+      doom_loop: 'allow',
+      skill: 'allow',
+    },
     autoupdate: false,
     snapshot: false,
     provider: providerOptions,
@@ -171,6 +208,7 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
 type SharedRuntime = {
   proc: ChildProcess;
   client: OpencodeClient;
+  questionClient: QuestionClient;
   stream: AsyncGenerator<{ type: string; properties: Record<string, unknown> }, void, void>;
   streamRelease: () => void;
 };
@@ -201,11 +239,16 @@ async function ensureSharedRuntime(options: ProviderOptions): Promise<SharedRunt
     const config = buildOpenCodeConfig(options);
     const { url, proc } = await spawnOpencodeServer(config);
     const client = createOpencodeClient({ baseUrl: url });
+    const questionClient = createOpencodeQuestionClient({ baseUrl: url });
     const sub = await client.event.subscribe();
     const stream = sub.stream as AsyncGenerator<{ type: string; properties: Record<string, unknown> }, void, void>;
+    // Belt-and-suspenders drain before this runtime serves any turn — see
+    // drainPendingQuestions doc comment.
+    await drainPendingQuestions(questionClient);
     sharedRuntime = {
       proc,
       client,
+      questionClient,
       stream,
       streamRelease: () => {
         void stream.return?.(undefined);
@@ -239,6 +282,74 @@ function sessionErrorMessage(props: { error?: unknown }): string {
     return err.data.message;
   }
   return JSON.stringify(props.error) || 'OpenCode session error';
+}
+
+// Steers the model rather than just silently declining: nothing in this
+// container can answer an interactive question, so tell it to decide on its
+// own or fall back to nanoclaw's own blocking MCP tool (mcp-tools/interactive.ts,
+// registered as `ask_user_question`), which actually reaches the human through
+// the chat channel instead of OpenCode's headless-dead-end question tool.
+export const QUESTION_STEERING_TEXT =
+  'Interactive questions are not available in this environment. Decide autonomously based on your best judgment, or use the ask_user_question MCP tool to ask the human through the chat channel.';
+
+/**
+ * Minimal shape of the `/v2` SDK surface this module needs for question
+ * handling — narrowed so tests can pass a fake without pulling in the real
+ * `@opencode-ai/sdk/v2` client.
+ */
+export interface QuestionClient {
+  question: {
+    reply(params: { requestID: string; answers: string[][] }): Promise<{ data?: unknown; error?: unknown }>;
+    list(): Promise<{ data?: Array<{ id: string; sessionID?: string; questions?: unknown[] }>; error?: unknown }>;
+  };
+}
+
+/**
+ * Answer a single pending question request with the steering text, one
+ * custom answer per sub-question (OpenCode's `question` tool defaults
+ * `custom: true`, i.e. an answer string that isn't one of the offered
+ * option labels is accepted as free text). Never throws — a failed
+ * auto-answer should not take down the session any more than the question
+ * already threatened to.
+ */
+export async function autoAnswerQuestion(
+  questionClient: QuestionClient,
+  req: { id?: string; questions?: unknown[] },
+): Promise<void> {
+  if (!req.id) return;
+  const count = Array.isArray(req.questions) && req.questions.length > 0 ? req.questions.length : 1;
+  try {
+    const res = await questionClient.question.reply({
+      requestID: req.id,
+      answers: Array.from({ length: count }, () => [QUESTION_STEERING_TEXT]),
+    });
+    if (res.error) {
+      log(`Failed to auto-answer question ${req.id}: ${JSON.stringify(res.error)}`);
+    }
+  } catch (err) {
+    log(`Failed to auto-answer question ${req.id}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+/**
+ * Defensive belt: drain any question requests already pending when a shared
+ * runtime comes up (e.g. one that raced the event subscription, or survived
+ * from a prior server instance) so none of them can sit there wedging future
+ * turns before the event-driven handler ever sees them.
+ */
+export async function drainPendingQuestions(questionClient: QuestionClient): Promise<void> {
+  try {
+    const res = await questionClient.question.list();
+    if (res.error) {
+      log(`Failed to list pending questions: ${JSON.stringify(res.error)}`);
+      return;
+    }
+    for (const req of res.data ?? []) {
+      await autoAnswerQuestion(questionClient, req);
+    }
+  } catch (err) {
+    log(`Failed to list pending questions: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 export class OpenCodeProvider implements AgentProvider {
@@ -289,7 +400,7 @@ export class OpenCodeProvider implements AgentProvider {
     async function* gen(): AsyncGenerator<ProviderEvent> {
       let initYielded = false;
       const rt = await ensureSharedRuntime(self.options);
-      const { client, stream } = rt;
+      const { client, stream, questionClient } = rt;
 
       while (!aborted) {
         while (pending.length === 0 && !ended && !aborted) {
@@ -386,6 +497,20 @@ export class OpenCodeProvider implements AgentProvider {
                   } catch (err) {
                     log(`Failed to auto-reply permission: ${err instanceof Error ? err.message : String(err)}`);
                   }
+                }
+                break;
+              }
+              case 'question.asked': {
+                // The `question: 'deny'` config above should stop this tool
+                // from ever firing, but this is the real fix for the wedge:
+                // whatever raises this event, answer it immediately so the
+                // single shared OpenCode server can never block on it — a
+                // config regression or an OpenCode-side path that raises the
+                // event before consulting permission should not be able to
+                // freeze every subsequent turn again.
+                const req = ev.properties as { id?: string; sessionID?: string; questions?: unknown[] };
+                if (req.sessionID === undefined || req.sessionID === sessionId) {
+                  await autoAnswerQuestion(questionClient, req);
                 }
                 break;
               }

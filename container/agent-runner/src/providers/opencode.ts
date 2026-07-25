@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, spawnSync, type ChildProcess } from 'child_process';
 import { existsSync } from 'fs';
 import { pathToFileURL } from 'url';
 
@@ -268,19 +268,21 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
 
   const mcp = mcpServersToOpenCodeConfig(options.mcpServers);
 
-  // Load shared base + per-group fragments + per-group memory through OpenCode's
-  // native instructions pipeline (session/instruction.ts). Absolute paths with
+  // Load the shared base + per-group fragments through OpenCode's native
+  // instructions pipeline (session/instruction.ts). Absolute paths with
   // globs are supported. Files are read raw — `@./...` includes are NOT expanded
   // by OpenCode, so point at the concrete files, not at composed CLAUDE.md.
+  //
+  // Memory deliberately does NOT ride this array. OpenCode's instruction
+  // pipeline calls instruction.system() on every model request and rereads
+  // each file raw, so memory files listed here would be re-read (uncapped,
+  // unrendered) on every request instead of following the shared
+  // startup/clear/compact lifecycle. Memory is delivered by the registered
+  // memory session hook instead — see createMemoryLifecycle below.
   const instructions = [
     '/app/CLAUDE.md',
     '/workspace/agent/.claude-fragments/*.md',
     '/workspace/agent/CLAUDE.local.md',
-    // Memory parity with the Claude provider: the session hook is a no-op here,
-    // so the two always-loaded memory files ride the instructions pipeline
-    // instead (same files renderMemorySection injects for Claude).
-    '/workspace/agent/memory/index.md',
-    '/workspace/agent/memory/system/definition.md',
   ];
 
   return {
@@ -475,6 +477,121 @@ export function createCompactionReminder(buildReminder: () => string = buildPost
 }
 
 /**
+ * Structural mirror of the runner's `MemorySessionHookRegistration`
+ * (`container/agent-runner/src/memory/session-hook.ts`). Declared locally for
+ * the same reason `codex-app-server.ts` declares `CodexMemorySessionHook`: this
+ * providers branch carries no `src/memory/*`, so importing the real type would
+ * not compile here, while a structural copy still satisfies the interface once
+ * this payload is installed onto a main-based tree. The command is referenced
+ * by string and executed as a subprocess — never imported — so the rendering
+ * and the 16k/file caps stay inside the shared hook.
+ */
+export interface OpenCodeMemorySessionHook {
+  readonly command: string;
+  readonly legacyCommands: readonly string[];
+  readonly sources: readonly string[];
+}
+
+/**
+ * The two lifecycle points at which this provider establishes a new context
+ * window. `clear` never appears: OpenCode has no in-session clear — a cleared
+ * conversation arrives as a fresh session, i.e. `startup`. `resume` never
+ * appears either, by contract: memory is not re-injected when an existing
+ * session continues.
+ */
+export type OpenCodeMemorySource = 'startup' | 'compact';
+
+/** Matches the `timeout: 10` (seconds) the Claude provider registers for the same command. */
+const MEMORY_HOOK_TIMEOUT_MS = 10_000;
+
+/**
+ * Run the registered memory session hook and return what it printed.
+ *
+ * The hook reads a Claude-style SessionStart payload on stdin and prints the
+ * rendered memory section on stdout (`src/memory/hook.ts`), which is where the
+ * per-file caps and the "resume gets nothing" rule live. Nothing is capped or
+ * rewritten here — whatever the command prints is what gets injected.
+ *
+ * Fails closed on every failure mode (unregistered, source the registration
+ * does not declare, missing command, non-zero exit, timeout, empty stdout):
+ * one log line, no injection, never a thrown turn.
+ */
+export function runMemorySessionHook(
+  hook: OpenCodeMemorySessionHook | undefined,
+  source: OpenCodeMemorySource,
+): string | undefined {
+  if (!hook) {
+    log(`No memory session hook registered; skipping ${source} memory injection`);
+    return undefined;
+  }
+  if (!hook.sources.includes(source)) {
+    log(`Memory session hook does not declare source ${source}; skipping injection`);
+    return undefined;
+  }
+
+  try {
+    const res = spawnSync(hook.command, {
+      shell: true,
+      input: JSON.stringify({ hook_event_name: 'SessionStart', source }),
+      encoding: 'utf-8',
+      timeout: MEMORY_HOOK_TIMEOUT_MS,
+    });
+    if (res.error || res.status !== 0) {
+      const why = res.error ? res.error.message : `exit ${String(res.status)}`;
+      log(`Memory session hook (${source}) failed (${why}); continuing without memory`);
+      return undefined;
+    }
+    const out = (res.stdout ?? '').trim();
+    if (!out) {
+      log(`Memory session hook (${source}) produced no output; continuing without memory`);
+      return undefined;
+    }
+    return out;
+  } catch (err) {
+    log(`Memory session hook (${source}) failed: ${err instanceof Error ? err.message : String(err)}`);
+    return undefined;
+  }
+}
+
+/**
+ * Per-query memory lifecycle. One instance per `query()`, mirroring
+ * createCompactionReminder, so nothing leaks between queries.
+ *
+ * `openingInstructions` covers the new-context case: an opening query with no
+ * continuation is a brand-new OpenCode session (a fresh container and a cleared
+ * conversation both land here), so memory joins the system instructions that
+ * prompt already carries — exactly one memory block per context window, since
+ * follow-up pushes re-send the plain instructions. A query that resumes a
+ * continuation passes the instructions through untouched and never runs the
+ * command at all.
+ *
+ * `pushPrefix` covers the other place a context window is rebuilt: OpenCode
+ * auto-compaction. The caller passes the compaction latch's armed state, so
+ * memory rides the same exactly-once next-prompt slot as the routing reminder.
+ */
+export function createMemoryLifecycle(
+  hook: OpenCodeMemorySessionHook | undefined,
+  isResume: boolean,
+): {
+  openingInstructions(systemInstructions?: string): string | undefined;
+  pushPrefix(justCompacted: boolean): string;
+} {
+  return {
+    openingInstructions(systemInstructions) {
+      if (isResume) return systemInstructions;
+      const memory = runMemorySessionHook(hook, 'startup');
+      if (!memory) return systemInstructions;
+      return systemInstructions ? `${memory}\n\n${systemInstructions}` : memory;
+    },
+    pushPrefix(justCompacted) {
+      if (!justCompacted) return '';
+      const memory = runMemorySessionHook(hook, 'compact');
+      return memory ? `${memory}\n\n` : '';
+    },
+  };
+}
+
+/**
  * Minimal shape of the `/v2` SDK surface this module needs for question
  * handling — narrowed so tests can pass a fake without pulling in the real
  * `@opencode-ai/sdk/v2` client.
@@ -539,18 +656,19 @@ export class OpenCodeProvider implements AgentProvider {
 
   private readonly options: ProviderOptions;
   private activeSessionId: string | undefined;
+  private memorySessionHook?: OpenCodeMemorySessionHook;
 
   constructor(options: ProviderOptions = {}) {
     this.options = options;
   }
 
-  // OpenCode has no native session-start hook command (the Claude Agent SDK
-  // mechanism this registers). Memory reaches the OpenCode agent through the
-  // native `instructions` file pipeline in buildOpenCodeConfig instead, so
-  // this is a no-op — same as the mock provider. Param typed `unknown` so this
-  // file compiles both on the providers branch (interface predates the member)
-  // and in a main-based install (structurally satisfies the required method).
-  registerMemorySessionHook(_hook: unknown): void {}
+  // OpenCode has no native session-start hook mechanism to hand the command to
+  // (as the Claude Agent SDK's settings.json and Codex's hooks.json have), so
+  // the provider stores the registration and runs the command itself at the
+  // lifecycle points OpenCode does expose — see createMemoryLifecycle.
+  registerMemorySessionHook(hook: OpenCodeMemorySessionHook): void {
+    this.memorySessionHook = hook;
+  }
 
   isSessionInvalid(err: unknown): boolean {
     const msg = err instanceof Error ? err.message : String(err);
@@ -558,6 +676,11 @@ export class OpenCodeProvider implements AgentProvider {
   }
 
   query(input: QueryInput): AgentQuery {
+    // Same refusal as the Codex provider: the runner registers the shared hook
+    // unconditionally before polling, so an unregistered provider means the
+    // wiring broke — fail loudly rather than run a memoryless agent forever.
+    if (!this.memorySessionHook) throw new Error('OpenCode memory session hook was not registered');
+
     if (input.continuation) {
       this.activeSessionId = input.continuation;
     } else {
@@ -572,10 +695,14 @@ export class OpenCodeProvider implements AgentProvider {
     // active session auto-compacts (see createCompactionReminder). Per-query so
     // it never leaks a pending reminder across independent query() calls.
     const compaction = createCompactionReminder();
+    // Memory rides the same two moments a context window is (re)built: this
+    // opening prompt when it starts a new session, and the first prompt after
+    // a compaction. Never on a resume, never on an ordinary push.
+    const memory = createMemoryLifecycle(this.memorySessionHook, Boolean(input.continuation));
 
     const systemInstructions = input.systemContext?.instructions;
     pending.push({
-      text: wrapPromptWithContext(input.prompt, systemInstructions),
+      text: wrapPromptWithContext(input.prompt, memory.openingInstructions(systemInstructions)),
       attachments: input.attachments,
     });
 
@@ -764,10 +891,13 @@ export class OpenCodeProvider implements AgentProvider {
 
     return {
       push: (message: string, attachments?: PromptAttachment[]) => {
-        // If the active session compacted mid-conversation, the routing
-        // reminder rides this next prompt (once), then the latch disarms.
+        // If the active session compacted mid-conversation, memory and the
+        // routing reminder both ride this next prompt (once each), then the
+        // latch disarms. Read the latch BEFORE apply() consumes it. Order is
+        // memory, then reminder, then the user's text.
+        const justCompacted = compaction.isArmed;
         pending.push({
-          text: wrapPromptWithContext(compaction.apply(message), systemInstructions),
+          text: wrapPromptWithContext(memory.pushPrefix(justCompacted) + compaction.apply(message), systemInstructions),
           attachments,
         });
         kick();

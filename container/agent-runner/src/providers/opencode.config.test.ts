@@ -145,13 +145,8 @@ describe('buildOpenCodeConfig model input modalities', () => {
   });
 });
 
-describe('buildOpenCodeConfig instructions', () => {
-  it('loads the two always-loaded memory files for parity with Claude', () => {
-    const config = buildOpenCodeConfig({});
-    expect(config.instructions).toContain('/workspace/agent/memory/index.md');
-    expect(config.instructions).toContain('/workspace/agent/memory/system/definition.md');
-  });
-});
+// The instructions array is covered in opencode.memory.test.ts, where the
+// memory-delivery contract it used to (wrongly) carry now lives.
 
 describe('buildOpenCodeConfig permission', () => {
   it('pins `question` to deny deterministically instead of a wildcard string', () => {

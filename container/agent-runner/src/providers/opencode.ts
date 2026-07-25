@@ -1,6 +1,8 @@
 import { spawn, type ChildProcess } from 'child_process';
+import { existsSync } from 'fs';
+import { pathToFileURL } from 'url';
 
-import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk';
+import { createOpencodeClient, type FilePartInput, type OpencodeClient } from '@opencode-ai/sdk';
 // The root `@opencode-ai/sdk` client (pinned ^1.4.3, resolves 1.4.11 on this
 // branch) has no `.question` surface at all — reply/reject/list for the
 // interactive `question` tool only exist on the `/v2` subpath client (present
@@ -9,7 +11,14 @@ import { createOpencodeClient, type OpencodeClient } from '@opencode-ai/sdk';
 import { createOpencodeClient as createOpencodeQuestionClient } from '@opencode-ai/sdk/v2';
 
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type {
+  AgentProvider,
+  AgentQuery,
+  ProviderEvent,
+  PromptAttachment,
+  ProviderOptions,
+  QueryInput,
+} from './types.js';
 import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
 import { getAllDestinations } from '../destinations.js';
 
@@ -80,6 +89,63 @@ function spawnOpencodeServer(config: Record<string, unknown>, timeoutMs = 10_000
       reject(err);
     });
   });
+}
+
+/** Extension → MIME fallback, for adapters that report no `mimeType`. */
+const ATTACHMENT_MIME_BY_EXT: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.heic': 'image/heic',
+  '.pdf': 'application/pdf',
+};
+
+function attachmentMime(att: PromptAttachment): string | undefined {
+  if (att.mime) return att.mime;
+  const name = att.path || att.filename || '';
+  const dot = name.lastIndexOf('.');
+  return dot < 0 ? undefined : ATTACHMENT_MIME_BY_EXT[name.slice(dot).toLowerCase()];
+}
+
+/**
+ * Turn a turn's attachments into OpenCode file parts, so the model sees the
+ * media itself rather than only the `[image: cat.png — saved to …]` line the
+ * formatter already renders into the prompt text.
+ *
+ * The URL is a `file://` path, NOT a data: URI, deliberately: OpenCode resolves
+ * a file: part server-side — packages/opencode/src/session/prompt.ts (v1.4.14)
+ * `case "file:"` at :1043 does `fileURLToPath(part.url)` at :1045 and, for a
+ * mime that is neither text/plain nor a directory, re-emits the part as
+ * `data:${part.mime};base64,` + the file it read (:1197-1199). Base64-ing here
+ * would only duplicate that work and inflate the request body. The server
+ * shares this container's filesystem (spawnOpencodeServer), so the path resolves.
+ *
+ * Only images and PDFs are forwarded; PDFs go through even though a given
+ * backend may reject them, since the alternative is silently withholding a
+ * document the user did send. Anything skipped is still described in the
+ * prompt text, so it is never lost — just not handed over as media.
+ *
+ * `exists` is injectable so tests can drive resolvability without touching disk.
+ */
+export function buildAttachmentFileParts(
+  attachments: PromptAttachment[] | undefined,
+  exists: (path: string) => boolean = existsSync,
+): FilePartInput[] {
+  const parts: FilePartInput[] = [];
+  for (const att of attachments ?? []) {
+    const mime = attachmentMime(att);
+    if (!mime) continue;
+    if (!mime.startsWith('image/') && mime !== 'application/pdf') continue;
+    if (!att.path || !exists(att.path)) {
+      const label = att.filename || att.path || att.url || 'unnamed';
+      log(`Attachment has no readable local file, not sent as media: ${label}`);
+      continue;
+    }
+    parts.push({ type: 'file', mime, filename: att.filename, url: pathToFileURL(att.path).href });
+  }
+  return parts;
 }
 
 function wrapPromptWithContext(text: string, systemInstructions?: string): string {
@@ -454,6 +520,10 @@ export class OpenCodeProvider implements AgentProvider {
 
     const systemInstructions = input.systemContext?.instructions;
     pending.push(wrapPromptWithContext(input.prompt, systemInstructions));
+    // Attachments ride the opening prompt only. push() carries chat text that
+    // arrived mid-turn, and AgentQuery.push takes a string — those attachments
+    // still reach the agent through the formatter's inline rendering.
+    let openingFileParts = buildAttachmentFileParts(input.attachments);
 
     const kick = (): void => {
       waiting?.();
@@ -479,6 +549,8 @@ export class OpenCodeProvider implements AgentProvider {
         if (pending.length === 0 && ended) return;
 
         const text = pending.shift()!;
+        const fileParts = openingFileParts;
+        openingFileParts = [];
         let sessionId = self.activeSessionId;
 
         if (!sessionId) {
@@ -498,7 +570,7 @@ export class OpenCodeProvider implements AgentProvider {
 
         const promptRes = await client.session.promptAsync({
           path: { id: sessionId },
-          body: { parts: [{ type: 'text', text }] },
+          body: { parts: [{ type: 'text', text }, ...fileParts] },
         });
         if (promptRes.error) {
           self.activeSessionId = undefined;

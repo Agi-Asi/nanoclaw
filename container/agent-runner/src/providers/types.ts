@@ -27,9 +27,31 @@ export interface ProviderOptions {
   additionalDirectories?: string[];
 }
 
+/**
+ * One channel attachment, in structured form.
+ *
+ * Every attachment is ALSO described inline in the formatted prompt (see
+ * formatter.ts formatAttachments) — that text rendering stays the contract for
+ * every provider. This is an additive view for providers whose SDK can take a
+ * real file part, so a provider that ignores it loses nothing.
+ */
+export interface PromptAttachment {
+  /** Display name, when the channel gave one. */
+  filename?: string;
+  /** MIME type as reported by the channel. Absent for adapters that omit it. */
+  mime?: string;
+  /** Absolute path inside the container, when the file was staged to the inbox. */
+  path?: string;
+  /** Remote URL, when the channel only supplied a link. */
+  url?: string;
+}
+
 export interface QueryInput {
   /** Initial prompt (already formatted by agent-runner). */
   prompt: string;
+
+  /** Attachments on the messages the prompt was built from, structured. */
+  attachments?: PromptAttachment[];
 
   /**
    * Opaque continuation token from a previous query. The provider decides

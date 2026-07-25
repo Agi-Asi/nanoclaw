@@ -46,6 +46,24 @@ describe('buildOpenCodeConfig provider transport', () => {
     const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
     expect(entry.npm).toBeUndefined();
   });
+
+  it('openrouter with a base URL keeps its native transport (no pin)', () => {
+    process.env.OPENCODE_PROVIDER = 'openrouter';
+    process.env.OPENCODE_MODEL = 'openrouter/some/model';
+    process.env.ANTHROPIC_BASE_URL = 'https://inference.example.test/v1';
+    const config = buildOpenCodeConfig({});
+    const entry = (config.provider as Record<string, Record<string, unknown>>).openrouter;
+    expect(entry.npm).toBeUndefined();
+  });
+
+  it('openai with a base URL still pins the Chat Completions transport', () => {
+    process.env.OPENCODE_PROVIDER = 'openai';
+    process.env.OPENCODE_MODEL = 'openai/some/local-model';
+    process.env.ANTHROPIC_BASE_URL = 'https://inference.example.test/v1';
+    const config = buildOpenCodeConfig({});
+    const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
+    expect(entry.npm).toBe('@ai-sdk/openai-compatible');
+  });
 });
 
 describe('buildOpenCodeConfig model limit', () => {

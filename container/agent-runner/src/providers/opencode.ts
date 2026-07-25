@@ -237,11 +237,15 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
       ? {}
       : {
           [provider]: {
-            // A custom base URL means a self-hosted OpenAI-compatible endpoint
-            // (vLLM, llama.cpp, …). The stock openai SDK package speaks the
-            // Responses API, whose multi-turn history vLLM rejects (assistant
-            // items lack id/status) — pin the Chat Completions transport.
-            ...(proxyUrl ? { npm: '@ai-sdk/openai-compatible' } : {}),
+            // A custom base URL on the `openai` provider means a self-hosted
+            // OpenAI-compatible endpoint (vLLM, llama.cpp, …). The stock openai
+            // SDK package speaks the Responses API, whose multi-turn history
+            // vLLM rejects (assistant items lack id/status) — pin the Chat
+            // Completions transport. Scoped to `openai` only: other providers
+            // (e.g. `openrouter`, set alongside ANTHROPIC_BASE_URL per the
+            // documented OpenRouter config) ship their own native ai-sdk
+            // package and must keep OpenCode's default transport resolution.
+            ...(provider === 'openai' && proxyUrl ? { npm: '@ai-sdk/openai-compatible' } : {}),
             options: { apiKey: 'placeholder', baseURL: proxyUrl },
             ...(modelsToRegister.length > 0
               ? {

@@ -9,6 +9,7 @@ const ENV_KEYS = [
   'ANTHROPIC_BASE_URL',
   'OPENCODE_MODEL_CONTEXT_LIMIT',
   'OPENCODE_MODEL_OUTPUT_LIMIT',
+  'OPENCODE_MODEL_INPUT_MODALITIES',
 ] as const;
 const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 
@@ -70,6 +71,59 @@ describe('buildOpenCodeConfig model limit', () => {
     const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
     const models = entry.models as Record<string, Record<string, unknown>>;
     expect(models['some/local-model'].limit).toBeUndefined();
+  });
+});
+
+describe('buildOpenCodeConfig model input modalities', () => {
+  function models(config: Record<string, unknown>) {
+    const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
+    return (entry.models as Record<string, Record<string, unknown>>)['some/local-model'];
+  }
+
+  function customModelEnv() {
+    process.env.OPENCODE_PROVIDER = 'openai';
+    process.env.OPENCODE_MODEL = 'openai/some/local-model';
+    process.env.ANTHROPIC_BASE_URL = 'https://inference.example.test/v1';
+  }
+
+  it('declares attachment + modalities so file parts survive the model call', () => {
+    customModelEnv();
+    process.env.OPENCODE_MODEL_INPUT_MODALITIES = 'image,pdf';
+    const model = models(buildOpenCodeConfig({}));
+    expect(model.attachment).toBe(true);
+    // `text` is always prepended: the declared input list REPLACES the defaults,
+    // so omitting it would turn off text input on the model entry.
+    expect(model.modalities).toEqual({ input: ['text', 'image', 'pdf'], output: ['text'] });
+  });
+
+  it('omits both capability keys when the env var is unset', () => {
+    customModelEnv();
+    delete process.env.OPENCODE_MODEL_INPUT_MODALITIES;
+    const model = models(buildOpenCodeConfig({}));
+    expect(model.attachment).toBeUndefined();
+    expect(model.modalities).toBeUndefined();
+  });
+
+  it('omits both capability keys when the env var is empty or only separators', () => {
+    customModelEnv();
+    process.env.OPENCODE_MODEL_INPUT_MODALITIES = ' , ,';
+    const model = models(buildOpenCodeConfig({}));
+    expect(model.attachment).toBeUndefined();
+    expect(model.modalities).toBeUndefined();
+  });
+
+  it('drops entries outside the schema enum and keeps the valid ones', () => {
+    customModelEnv();
+    process.env.OPENCODE_MODEL_INPUT_MODALITIES = ' IMAGE , hologram, pdf ,image';
+    const model = models(buildOpenCodeConfig({}));
+    expect(model.modalities).toEqual({ input: ['text', 'image', 'pdf'], output: ['text'] });
+  });
+
+  it('does not duplicate text when the operator lists it explicitly', () => {
+    customModelEnv();
+    process.env.OPENCODE_MODEL_INPUT_MODALITIES = 'text,image';
+    const model = models(buildOpenCodeConfig({}));
+    expect(model.modalities).toEqual({ input: ['text', 'image'], output: ['text'] });
   });
 });
 

@@ -26,6 +26,12 @@ function log(msg: string): void {
   console.error(`[opencode-provider] ${msg}`);
 }
 
+// The input modalities OpenCode's config schema accepts on a model entry
+// (@opencode-ai/sdk types.gen.d.ts `modalities.input`). Anything outside this
+// set makes OpenCode reject the whole config, so operator input is validated
+// against it rather than passed through.
+const MODEL_INPUT_MODALITIES = ['text', 'audio', 'image', 'video', 'pdf'] as const;
+
 const SESSION_STATUS_RETRY_ERROR_AFTER = 3;
 
 /** Stale / dead OpenCode session heuristics (complement Claude-centric host patterns). */
@@ -197,6 +203,35 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
         }
       : undefined;
 
+  // OpenCode drops every non-text file part whose modality the model does not
+  // declare: provider/transform.ts:292 (v1.4.14) keeps a part only when
+  // `model.capabilities.input[modality]` is true, and otherwise substitutes
+  // `ERROR: Cannot read … (this model does not support <modality> input)`.
+  // A registry-unknown custom model resolves each of those flags to false
+  // (provider/provider.ts:1154-1158), so an image reaches the session store but
+  // never the model — live-confirmed on a vLLM-hosted model, which answered
+  // that it does not support image input while the prompt carried zero image
+  // tokens. Declaring the modalities is the only thing that opens that gate;
+  // `attachment` is a registry/UI flag rather than a pipeline gate, but it is
+  // set alongside so the entry stays internally consistent.
+  // Absent this env var, behavior is unchanged (no capability keys emitted).
+  const modalityEnv = process.env.OPENCODE_MODEL_INPUT_MODALITIES;
+  const requestedModalities = (modalityEnv ?? '')
+    .split(',')
+    .map((entry) => entry.trim().toLowerCase())
+    .filter(Boolean)
+    .filter((entry, i, a) => a.indexOf(entry) === i)
+    .filter((entry) => {
+      if ((MODEL_INPUT_MODALITIES as readonly string[]).includes(entry)) return true;
+      log(`Ignoring unknown OPENCODE_MODEL_INPUT_MODALITIES entry: ${entry}`);
+      return false;
+    })
+    .filter((entry) => entry !== 'text');
+  const modelModalities =
+    requestedModalities.length > 0
+      ? { input: ['text', ...requestedModalities], output: ['text'] }
+      : undefined;
+
   const providerOptions: Record<string, unknown> =
     provider === 'anthropic'
       ? {}
@@ -218,6 +253,7 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
                         name: mid,
                         tool_call: true,
                         ...(modelLimit ? { limit: modelLimit } : {}),
+                        ...(modelModalities ? { attachment: true, modalities: modelModalities } : {}),
                       },
                     ]),
                   ),

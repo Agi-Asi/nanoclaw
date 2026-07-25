@@ -44,6 +44,7 @@ registerProviderContainerConfig('opencode', (ctx) => {
     'ANTHROPIC_BASE_URL',
     'OPENCODE_MODEL_CONTEXT_LIMIT',
     'OPENCODE_MODEL_OUTPUT_LIMIT',
+    'OPENCODE_MODEL_INPUT_MODALITIES',
   ] as const) {
     const value = ctx.hostEnv[key];
     if (value) env[key] = value;

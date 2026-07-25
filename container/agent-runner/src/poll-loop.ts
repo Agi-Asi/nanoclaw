@@ -290,7 +290,7 @@ async function processQuery(
 
       const prompt = formatMessages(newMessages);
       log(`Pushing ${newMessages.length} follow-up message(s) into active query`);
-      query.push(prompt);
+      query.push(prompt, extractAttachments(newMessages));
 
       markCompleted(newIds);
     }

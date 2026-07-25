@@ -78,8 +78,16 @@ export interface McpServerConfig {
 }
 
 export interface AgentQuery {
-  /** Push a follow-up message into the active query. */
-  push(message: string): void;
+  /**
+   * Push a follow-up message into the active query.
+   *
+   * Attachments are optional and structured exactly like QueryInput's: a
+   * provider that keeps one long-lived query per session (OpenCode) sees most
+   * real traffic here rather than through query(), so media has to travel on
+   * this path too. Providers that ignore the argument behave as before — the
+   * formatter still describes every attachment inside `message`.
+   */
+  push(message: string, attachments?: PromptAttachment[]): void;
 
   /** Signal that no more input will be sent. */
   end(): void;

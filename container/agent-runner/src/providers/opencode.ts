@@ -148,6 +148,21 @@ export function buildAttachmentFileParts(
   return parts;
 }
 
+/**
+ * The prompt body for one turn: the text the formatter produced, plus any
+ * media that came with it. Both the opening prompt and every mid-turn push go
+ * through here, so an attachment reaches the model the same way whichever path
+ * carried it — OpenCode holds one query open per session, so in practice most
+ * real messages arrive as pushes.
+ */
+export function buildPromptParts(
+  text: string,
+  attachments?: PromptAttachment[],
+  exists: (path: string) => boolean = existsSync,
+): Array<{ type: 'text'; text: string } | FilePartInput> {
+  return [{ type: 'text', text }, ...buildAttachmentFileParts(attachments, exists)];
+}
+
 function wrapPromptWithContext(text: string, systemInstructions?: string): string {
   let out = text;
   if (systemInstructions) {
@@ -509,7 +524,7 @@ export class OpenCodeProvider implements AgentProvider {
       this.activeSessionId = undefined;
     }
 
-    const pending: string[] = [];
+    const pending: Array<{ text: string; attachments?: PromptAttachment[] }> = [];
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
@@ -519,11 +534,10 @@ export class OpenCodeProvider implements AgentProvider {
     const compaction = createCompactionReminder();
 
     const systemInstructions = input.systemContext?.instructions;
-    pending.push(wrapPromptWithContext(input.prompt, systemInstructions));
-    // Attachments ride the opening prompt only. push() carries chat text that
-    // arrived mid-turn, and AgentQuery.push takes a string — those attachments
-    // still reach the agent through the formatter's inline rendering.
-    let openingFileParts = buildAttachmentFileParts(input.attachments);
+    pending.push({
+      text: wrapPromptWithContext(input.prompt, systemInstructions),
+      attachments: input.attachments,
+    });
 
     const kick = (): void => {
       waiting?.();
@@ -548,9 +562,7 @@ export class OpenCodeProvider implements AgentProvider {
         if (aborted) return;
         if (pending.length === 0 && ended) return;
 
-        const text = pending.shift()!;
-        const fileParts = openingFileParts;
-        openingFileParts = [];
+        const { text, attachments } = pending.shift()!;
         let sessionId = self.activeSessionId;
 
         if (!sessionId) {
@@ -570,7 +582,7 @@ export class OpenCodeProvider implements AgentProvider {
 
         const promptRes = await client.session.promptAsync({
           path: { id: sessionId },
-          body: { parts: [{ type: 'text', text }, ...fileParts] },
+          body: { parts: buildPromptParts(text, attachments) },
         });
         if (promptRes.error) {
           self.activeSessionId = undefined;
@@ -711,10 +723,13 @@ export class OpenCodeProvider implements AgentProvider {
     }
 
     return {
-      push: (message: string) => {
+      push: (message: string, attachments?: PromptAttachment[]) => {
         // If the active session compacted mid-conversation, the routing
         // reminder rides this next prompt (once), then the latch disarms.
-        pending.push(wrapPromptWithContext(compaction.apply(message), systemInstructions));
+        pending.push({
+          text: wrapPromptWithContext(compaction.apply(message), systemInstructions),
+          attachments,
+        });
         kick();
       },
       end: () => {

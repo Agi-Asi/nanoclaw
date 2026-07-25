@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { initTestSessionDb, closeSessionDb, getInboundDb } from '../db/connection.js';
 import { getPendingMessages } from '../db/messages-in.js';
 import { extractAttachments } from '../formatter.js';
-import { buildAttachmentFileParts } from './opencode.js';
+import { buildAttachmentFileParts, buildPromptParts } from './opencode.js';
 
 /**
  * Channel attachments reach providers as prompt text (formatter.ts
@@ -94,6 +94,51 @@ describe('buildAttachmentFileParts', () => {
       exists,
     );
     expect(parts).toEqual([]);
+  });
+});
+
+/**
+ * OpenCode keeps ONE query open per session, so after the first turn nearly
+ * every real message arrives through AgentQuery.push rather than query(). The
+ * prompt body for a push is built the same way as the opening one — otherwise
+ * a photo sent as the second message reaches the model as prose only, and the
+ * model confabulates a description of a picture it never saw (observed live).
+ */
+describe('buildPromptParts', () => {
+  it('carries an image on a follow-up push, not just the opening query', () => {
+    const parts = buildPromptParts(
+      'what is in this photo?',
+      [{ filename: 'cat.png', mime: 'image/png', path: '/workspace/inbox/msg-1/cat.png' }],
+      exists,
+    );
+    expect(parts).toEqual([
+      { type: 'text', text: 'what is in this photo?' },
+      {
+        type: 'file',
+        mime: 'image/png',
+        filename: 'cat.png',
+        url: 'file:///workspace/inbox/msg-1/cat.png',
+      },
+    ]);
+  });
+
+  it('stays text-only when the push has no attachments', () => {
+    expect(buildPromptParts('just words', undefined, exists)).toEqual([{ type: 'text', text: 'just words' }]);
+    expect(buildPromptParts('just words', [], exists)).toEqual([{ type: 'text', text: 'just words' }]);
+  });
+
+  it('keeps the text part first and skips media it cannot resolve', () => {
+    const parts = buildPromptParts(
+      'two files',
+      [
+        { filename: 'gone.png', mime: 'image/png', path: '/workspace/inbox/msg-9/gone.png' },
+        { filename: 'report.pdf', mime: 'application/pdf', path: '/workspace/inbox/msg-1/report.pdf' },
+      ],
+      exists,
+    );
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toEqual({ type: 'text', text: 'two files' });
+    expect(parts[1]).toMatchObject({ type: 'file', mime: 'application/pdf' });
   });
 });
 

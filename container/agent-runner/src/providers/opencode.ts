@@ -336,6 +336,8 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
     // resolves to a single deterministic value — `deny` — that can never
     // contradict itself, while every other category keeps the prior
     // "allow everything" behavior.
+    // A category OpenCode adds after this list was written is absent from it,
+    // and so resolves to OpenCode's own default rather than to `allow`.
     permission: {
       read: 'allow',
       edit: 'allow',

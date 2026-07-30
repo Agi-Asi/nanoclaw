@@ -110,6 +110,35 @@ describe('handleQuestionAsked', () => {
     await handleQuestionAsked(client, { id: 'que_no_session', questions: [{}] });
     expect(replyCalls.map((c) => c.requestID)).toEqual(['que_no_session']);
   });
+
+  it('gives up after its timeout and logs, so a never-resolving reply cannot stall the turn', async () => {
+    // Mirrors drainPendingQuestions' own timeout test: `.reply()` here never
+    // resolves, simulating a hung round-trip on the per-turn event path.
+    // handleQuestionAsked is awaited inline from the `question.asked` case in
+    // the provider's event loop, so it must return on its own timeout budget
+    // rather than stall the turn forever. A short budget keeps this
+    // deterministic instead of waiting out the real 10s production default.
+    const client: QuestionClient = {
+      question: {
+        reply: () => new Promise(() => {}),
+        list: async () => ({ data: [] }),
+      },
+    };
+
+    const original = console.error;
+    const messages: string[] = [];
+    console.error = ((...args: unknown[]) => {
+      messages.push(String(args[0]));
+    }) as typeof console.error;
+
+    try {
+      await expect(handleQuestionAsked(client, { id: 'que_hung', questions: [{}] }, 20)).resolves.toBeUndefined();
+    } finally {
+      console.error = original;
+    }
+
+    expect(messages.some((m) => m.includes('Timed out') && m.includes('que_hung'))).toBe(true);
+  });
 });
 
 describe('drainPendingQuestions', () => {

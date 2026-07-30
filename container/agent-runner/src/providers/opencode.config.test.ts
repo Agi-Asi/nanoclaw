@@ -191,6 +191,62 @@ describe('buildOpenCodeConfig model input modalities', () => {
   });
 });
 
+describe('buildOpenCodeConfig small model scope', () => {
+  function scopeEnv() {
+    process.env.OPENCODE_PROVIDER = 'openai';
+    process.env.OPENCODE_MODEL = 'openai/main/model';
+    process.env.ANTHROPIC_BASE_URL = 'https://inference.example.test/v1';
+    process.env.OPENCODE_MODEL_CONTEXT_LIMIT = '65536';
+    process.env.OPENCODE_MODEL_OUTPUT_LIMIT = '8192';
+    process.env.OPENCODE_MODEL_INPUT_MODALITIES = 'image,pdf';
+  }
+
+  function models(config: Record<string, unknown>) {
+    const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
+    return entry.models as Record<string, Record<string, unknown>>;
+  }
+
+  it('applies limit and modalities to the main model only, leaving a distinct small model bare', () => {
+    scopeEnv();
+    process.env.OPENCODE_SMALL_MODEL = 'openai/small/model';
+    const all = models(buildOpenCodeConfig({}));
+
+    expect(all['main/model']).toEqual({
+      id: 'main/model',
+      name: 'main/model',
+      tool_call: true,
+      limit: { context: 65536, output: 8192 },
+      attachment: true,
+      modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
+    });
+    // A distinct small model carries neither key — an undeclared context
+    // window / modality set is the safe default it falls back to.
+    expect(all['small/model']).toEqual({ id: 'small/model', name: 'small/model', tool_call: true });
+  });
+
+  it('small model unset or equal to the main model keeps the pre-existing single-entry shape', () => {
+    scopeEnv();
+    delete process.env.OPENCODE_SMALL_MODEL;
+    const unset = models(buildOpenCodeConfig({}));
+
+    process.env.OPENCODE_SMALL_MODEL = 'openai/main/model'; // same as OPENCODE_MODEL
+    const same = models(buildOpenCodeConfig({}));
+
+    const expected = {
+      'main/model': {
+        id: 'main/model',
+        name: 'main/model',
+        tool_call: true,
+        limit: { context: 65536, output: 8192 },
+        attachment: true,
+        modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
+      },
+    };
+    expect(unset).toEqual(expected);
+    expect(same).toEqual(expected);
+  });
+});
+
 // The instructions array is covered in opencode.memory.test.ts, where the
 // memory-delivery contract it used to (wrongly) carry now lives.
 

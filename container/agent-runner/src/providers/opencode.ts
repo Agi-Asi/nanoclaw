@@ -283,16 +283,26 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
             ...(modelsToRegister.length > 0
               ? {
                   models: Object.fromEntries(
-                    modelsToRegister.map((mid) => [
-                      mid,
-                      {
-                        id: mid,
-                        name: mid,
-                        tool_call: true,
-                        ...(modelLimit ? { limit: modelLimit } : {}),
-                        ...(modelModalities ? { attachment: true, modalities: modelModalities } : {}),
-                      },
-                    ]),
+                    modelsToRegister.map((mid) => {
+                      // limit/modalities describe the MAIN model only — the env
+                      // vars name no small-model equivalent. Spreading them onto
+                      // a distinct OPENCODE_SMALL_MODEL entry would falsely
+                      // declare its context window and media support as the
+                      // main model's own. A small model that differs from the
+                      // main one gets a bare entry instead, which resolves
+                      // through OpenCode's own undeclared-model default.
+                      const isMainModel = mid === providerModelId;
+                      return [
+                        mid,
+                        {
+                          id: mid,
+                          name: mid,
+                          tool_call: true,
+                          ...(isMainModel && modelLimit ? { limit: modelLimit } : {}),
+                          ...(isMainModel && modelModalities ? { attachment: true, modalities: modelModalities } : {}),
+                        },
+                      ];
+                    }),
                   ),
                 }
               : {}),
@@ -668,7 +678,9 @@ export async function autoAnswerQuestion(
 /**
  * Matches the startup-blocking budget `spawnOpencodeServer` already uses for
  * its own default `timeoutMs`. This is a startup-path call like that one, so
- * it gets the same allowance.
+ * it gets the same allowance. Shared with `handleQuestionAsked` below — the
+ * same fail-open budget applies whether a hung reply is discovered at
+ * runtime startup or mid-turn.
  */
 const DRAIN_PENDING_QUESTIONS_TIMEOUT_MS = 10_000;
 
@@ -683,13 +695,33 @@ const DRAIN_PENDING_QUESTIONS_TIMEOUT_MS = 10_000;
  * unanswered, no matter whose sessionID it carries. Same rule as
  * `drainPendingQuestions`, so behavior does not depend on which path sees a
  * question first.
+ *
+ * Bounded the same way `drainPendingQuestions` bounds its own await: this is
+ * called inline from the turn's event loop (the `question.asked` case
+ * below), so a `reply()` that never resolves would stall the turn, not just
+ * startup. `timeoutMs` is injectable so tests don't wait out the real
+ * default; on timeout this logs one line and returns, fail-open, same as the
+ * drain path.
  */
 export async function handleQuestionAsked(
   questionClient: QuestionClient,
   req: { id?: string; sessionID?: string; questions?: unknown[] },
+  timeoutMs = DRAIN_PENDING_QUESTIONS_TIMEOUT_MS,
 ): Promise<void> {
   log(`Auto-answering question ${req.id ?? '(no id)'} (sessionID=${req.sessionID ?? 'unknown'})`);
-  await autoAnswerQuestion(questionClient, req);
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<true>((resolve) => {
+    timer = setTimeout(() => resolve(true), timeoutMs);
+  });
+
+  try {
+    if (await Promise.race([autoAnswerQuestion(questionClient, req).then(() => false as const), timedOut])) {
+      log(`Timed out after ${timeoutMs}ms auto-answering question ${req.id ?? '(no id)'}; continuing`);
+    }
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /**
@@ -725,12 +757,20 @@ export async function drainPendingQuestions(
     }
   })();
 
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const timedOut = new Promise<true>((resolve) => {
-    setTimeout(() => resolve(true), timeoutMs);
+    timer = setTimeout(() => resolve(true), timeoutMs);
   });
 
-  if (await Promise.race([drain.then(() => false as const), timedOut])) {
-    log(`Timed out after ${timeoutMs}ms draining pending questions; continuing startup`);
+  try {
+    if (await Promise.race([drain.then(() => false as const), timedOut])) {
+      log(`Timed out after ${timeoutMs}ms draining pending questions; continuing startup`);
+    }
+  } finally {
+    // A fast drain resolves before the timer fires, but the timer stays live
+    // until it does — clear it here so it can't hold this call alive or fire
+    // spuriously into a `timedOut` promise no one is racing against anymore.
+    clearTimeout(timer);
   }
 }
 

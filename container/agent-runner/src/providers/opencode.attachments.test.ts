@@ -1,18 +1,20 @@
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { describe, it, expect } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getInboundDb } from '../db/connection.js';
-import { getPendingMessages } from '../db/messages-in.js';
-import { extractAttachments } from '../formatter.js';
 import { buildAttachmentFileParts, buildPromptParts } from './opencode.js';
 
 /**
- * Channel attachments reach providers as prompt text (formatter.ts
- * formatAttachments). That stays, but text alone means a photo never actually
- * reaches a multimodal model. These cover the structured seam: extraction off
- * the message row, and the OpenCode file parts built from it.
+ * Channel attachments reach providers as prompt text (the formatter renders a
+ * line describing each one). That stays, but text alone means a photo never
+ * actually reaches a multimodal model. These cover the provider half of the
+ * structured seam: the OpenCode file parts built from an attachment, on the
+ * opening prompt and on every follow-up push.
  *
  * The `file://` URL form is load-bearing — OpenCode reads the path server-side
  * and inlines it as base64 itself (see buildAttachmentFileParts).
+ *
+ * Attachments are constructed inline here rather than produced upstream: the
+ * provider takes the shape structurally, so what these pin down is its own
+ * consumption, independent of whoever assembled the attachment.
  */
 
 const PRESENT = new Set([
@@ -139,62 +141,5 @@ describe('buildPromptParts', () => {
     expect(parts).toHaveLength(2);
     expect(parts[0]).toEqual({ type: 'text', text: 'two files' });
     expect(parts[1]).toMatchObject({ type: 'file', mime: 'application/pdf' });
-  });
-});
-
-describe('extractAttachments', () => {
-  beforeEach(() => {
-    initTestSessionDb();
-  });
-
-  afterEach(() => {
-    closeSessionDb();
-  });
-
-  function insertChat(id: string, content: object): void {
-    getInboundDb()
-      .prepare(
-        `INSERT INTO messages_in (id, kind, timestamp, status, content)
-         VALUES (?, 'chat', ?, 'pending', ?)`,
-      )
-      .run(id, new Date().toISOString(), JSON.stringify(content));
-  }
-
-  it('resolves localPath against /workspace and carries mime through', () => {
-    insertChat('m1', {
-      text: 'look',
-      attachments: [{ type: 'image', name: 'cat.png', mimeType: 'image/png', localPath: 'inbox/m1/cat.png' }],
-    });
-    const attachments = extractAttachments(getPendingMessages());
-    expect(attachments).toEqual([
-      { filename: 'cat.png', mime: 'image/png', path: '/workspace/inbox/m1/cat.png', url: undefined },
-    ]);
-  });
-
-  it('returns nothing for a message with no attachments', () => {
-    insertChat('m1', { text: 'just words' });
-    expect(extractAttachments(getPendingMessages())).toEqual([]);
-  });
-
-  it('collects across every message in the batch', () => {
-    insertChat('m1', {
-      text: 'a',
-      attachments: [{ name: 'a.png', mimeType: 'image/png', localPath: 'inbox/m1/a.png' }],
-    });
-    insertChat('m2', {
-      text: 'b',
-      attachments: [{ name: 'b.pdf', mimeType: 'application/pdf', localPath: 'inbox/m2/b.pdf' }],
-    });
-    const attachments = extractAttachments(getPendingMessages());
-    expect(attachments.map((a) => a.path)).toEqual(['/workspace/inbox/m1/a.png', '/workspace/inbox/m2/b.pdf']);
-  });
-
-  it('keeps a url-only attachment (no staged file) so the provider can decide', () => {
-    insertChat('m1', { text: 'link', attachments: [{ name: 'remote.png', url: 'https://example.test/remote.png' }] });
-    const attachments = extractAttachments(getPendingMessages());
-    expect(attachments).toEqual([
-      { filename: 'remote.png', mime: undefined, path: undefined, url: 'https://example.test/remote.png' },
-    ]);
-    expect(buildAttachmentFileParts(attachments, exists)).toEqual([]);
   });
 });

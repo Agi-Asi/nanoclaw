@@ -11,14 +11,7 @@ import { createOpencodeClient, type FilePartInput, type OpencodeClient } from '@
 import { createOpencodeClient as createOpencodeQuestionClient } from '@opencode-ai/sdk/v2';
 
 import { registerProvider } from './provider-registry.js';
-import type {
-  AgentProvider,
-  AgentQuery,
-  ProviderEvent,
-  PromptAttachment,
-  ProviderOptions,
-  QueryInput,
-} from './types.js';
+import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
 import { mcpServersToOpenCodeConfig } from './mcp-to-opencode.js';
 import { getAllDestinations } from '../destinations.js';
 
@@ -97,6 +90,29 @@ function spawnOpencodeServer(config: Record<string, unknown>, timeoutMs = 10_000
   });
 }
 
+/**
+ * One channel attachment, in structured form: a display name, a MIME type, a
+ * path to the staged file inside the container, a remote URL — each present
+ * only when the channel supplied it.
+ *
+ * Declared here rather than imported from `./types.js` because this file is
+ * also installed onto agent-runners whose shared types carry no attachment
+ * shape at all. Structural typing makes the two interchangeable wherever both
+ * exist, so nothing is lost by keeping the declaration local, while an install
+ * that predates the shared one still compiles.
+ *
+ * Attachments are ALSO described inline in the prompt text the formatter
+ * produces, and that text rendering stays the contract every provider relies
+ * on. Everything below is an additive view for OpenCode's file parts: when no
+ * structured attachment arrives, the provider behaves exactly as it did before.
+ */
+export interface OpenCodePromptAttachment {
+  filename?: string;
+  mime?: string;
+  path?: string;
+  url?: string;
+}
+
 /** Extension → MIME fallback, for adapters that report no `mimeType`. */
 const ATTACHMENT_MIME_BY_EXT: Record<string, string> = {
   '.png': 'image/png',
@@ -108,7 +124,7 @@ const ATTACHMENT_MIME_BY_EXT: Record<string, string> = {
   '.pdf': 'application/pdf',
 };
 
-function attachmentMime(att: PromptAttachment): string | undefined {
+function attachmentMime(att: OpenCodePromptAttachment): string | undefined {
   if (att.mime) return att.mime;
   const name = att.path || att.filename || '';
   const dot = name.lastIndexOf('.');
@@ -136,7 +152,7 @@ function attachmentMime(att: PromptAttachment): string | undefined {
  * `exists` is injectable so tests can drive resolvability without touching disk.
  */
 export function buildAttachmentFileParts(
-  attachments: PromptAttachment[] | undefined,
+  attachments: OpenCodePromptAttachment[] | undefined,
   exists: (path: string) => boolean = existsSync,
 ): FilePartInput[] {
   const parts: FilePartInput[] = [];
@@ -163,7 +179,7 @@ export function buildAttachmentFileParts(
  */
 export function buildPromptParts(
   text: string,
-  attachments?: PromptAttachment[],
+  attachments?: OpenCodePromptAttachment[],
   exists: (path: string) => boolean = existsSync,
 ): Array<{ type: 'text'; text: string } | FilePartInput> {
   return [{ type: 'text', text }, ...buildAttachmentFileParts(attachments, exists)];
@@ -704,7 +720,7 @@ export class OpenCodeProvider implements AgentProvider {
       this.activeSessionId = undefined;
     }
 
-    const pending: Array<{ text: string; attachments?: PromptAttachment[] }> = [];
+    const pending: Array<{ text: string; attachments?: OpenCodePromptAttachment[] }> = [];
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
@@ -718,9 +734,13 @@ export class OpenCodeProvider implements AgentProvider {
     const memory = createMemoryLifecycle(this.memorySessionHook, Boolean(input.continuation));
 
     const systemInstructions = input.systemContext?.instructions;
+    // Read structurally rather than off `QueryInput` directly: an agent-runner
+    // that does not carry the attachment field still type-checks here, and
+    // yields `undefined` — the same no-op as a turn that arrived without media.
+    const openingAttachments = (input as QueryInput & { attachments?: OpenCodePromptAttachment[] }).attachments;
     pending.push({
       text: wrapPromptWithContext(input.prompt, memory.openingInstructions(systemInstructions)),
-      attachments: input.attachments,
+      attachments: openingAttachments,
     });
 
     const kick = (): void => {
@@ -907,7 +927,7 @@ export class OpenCodeProvider implements AgentProvider {
     }
 
     return {
-      push: (message: string, attachments?: PromptAttachment[]) => {
+      push: (message: string, attachments?: OpenCodePromptAttachment[]) => {
         // If the active session compacted mid-conversation, memory and the
         // routing reminder both ride this next prompt (once each), then the
         // latch disarms. Read the latch BEFORE apply() consumes it. Order is

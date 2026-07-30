@@ -7,15 +7,7 @@ import {
   migrateLegacyContinuation,
   setContinuation,
 } from './db/session-state.js';
-import {
-  formatMessages,
-  extractRouting,
-  extractAttachments,
-  categorizeMessage,
-  isClearCommand,
-  stripInternalTags,
-  type RoutingContext,
-} from './formatter.js';
+import { formatMessages, extractRouting, categorizeMessage, isClearCommand, stripInternalTags, type RoutingContext } from './formatter.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 
 const POLL_INTERVAL_MS = 1000;
@@ -170,7 +162,6 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     const query = config.provider.query({
       prompt,
-      attachments: extractAttachments(keep),
       continuation,
       cwd: config.cwd,
       systemContext: config.systemContext,
@@ -290,7 +281,7 @@ async function processQuery(
 
       const prompt = formatMessages(newMessages);
       log(`Pushing ${newMessages.length} follow-up message(s) into active query`);
-      query.push(prompt, extractAttachments(newMessages));
+      query.push(prompt);
 
       markCompleted(newIds);
     }

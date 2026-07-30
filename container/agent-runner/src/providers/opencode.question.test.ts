@@ -1,6 +1,12 @@
 import { describe, it, expect } from 'bun:test';
 
-import { autoAnswerQuestion, drainPendingQuestions, QUESTION_STEERING_TEXT, type QuestionClient } from './opencode.js';
+import {
+  autoAnswerQuestion,
+  drainPendingQuestions,
+  handleQuestionAsked,
+  QUESTION_STEERING_TEXT,
+  type QuestionClient,
+} from './opencode.js';
 
 /**
  * Fake `/v2` question client — captures every reply/list call so tests can
@@ -76,6 +82,36 @@ describe('autoAnswerQuestion', () => {
   });
 });
 
+describe('handleQuestionAsked', () => {
+  it('answers a question.asked event whose sessionID differs from the active session', async () => {
+    // This is the wedge fix: previously the `question.asked` case in
+    // OpenCodeProvider's event loop skipped events where `req.sessionID` was
+    // set and did not match the turn's own session. The server is shared, so
+    // a skipped foreign-session question stayed wedged until the next
+    // runtime creation ran drainPendingQuestions. handleQuestionAsked is what
+    // that switch case now delegates to unconditionally — assert it answers
+    // regardless of sessionID, simulating a question raised by some other,
+    // unrelated session on the shared server.
+    const { client, replyCalls } = createFakeQuestionClient();
+
+    await handleQuestionAsked(client, {
+      id: 'que_foreign_session',
+      sessionID: 'ses_some_other_session',
+      questions: [{}],
+    });
+
+    expect(replyCalls).toEqual([
+      { requestID: 'que_foreign_session', answers: [[QUESTION_STEERING_TEXT]] },
+    ]);
+  });
+
+  it('answers regardless of whether sessionID is present at all', async () => {
+    const { client, replyCalls } = createFakeQuestionClient();
+    await handleQuestionAsked(client, { id: 'que_no_session', questions: [{}] });
+    expect(replyCalls.map((c) => c.requestID)).toEqual(['que_no_session']);
+  });
+});
+
 describe('drainPendingQuestions', () => {
   it('answers every question already pending when the runtime starts', async () => {
     const { client, replyCalls } = createFakeQuestionClient({
@@ -107,5 +143,34 @@ describe('drainPendingQuestions', () => {
       },
     };
     await expect(drainPendingQuestions(client)).resolves.toBeUndefined();
+  });
+
+  it('gives up after its timeout and logs, so a hung round-trip cannot block runtime startup', async () => {
+    // The `.list()` call here never resolves — simulating a hung round-trip
+    // to the OpenCode server. drainPendingQuestions is awaited inline in the
+    // runtime-startup path, so it must return on its own timeout budget
+    // rather than hang the caller forever. A short budget (well under bun
+    // test's default timeout) keeps this deterministic and fast instead of
+    // actually waiting out the real 10s production default.
+    const client: QuestionClient = {
+      question: {
+        reply: async () => ({ data: true }),
+        list: () => new Promise(() => {}),
+      },
+    };
+
+    const original = console.error;
+    const messages: string[] = [];
+    console.error = ((...args: unknown[]) => {
+      messages.push(String(args[0]));
+    }) as typeof console.error;
+
+    try {
+      await expect(drainPendingQuestions(client, 20)).resolves.toBeUndefined();
+    } finally {
+      console.error = original;
+    }
+
+    expect(messages.some((m) => m.includes('Timed out') && m.includes('draining pending questions'))).toBe(true);
   });
 });

@@ -666,23 +666,71 @@ export async function autoAnswerQuestion(
 }
 
 /**
+ * Matches the startup-blocking budget `spawnOpencodeServer` already uses for
+ * its own default `timeoutMs`. This is a startup-path call like that one, so
+ * it gets the same allowance.
+ */
+const DRAIN_PENDING_QUESTIONS_TIMEOUT_MS = 10_000;
+
+/**
+ * Handle a `question.asked` SSE event: always answer it, regardless of which
+ * session raised it. The `question: 'deny'` config above should stop this
+ * tool from ever firing, but this is the real fix for the wedge: the
+ * OpenCode server is shared across every session on this runtime, and a
+ * pending question wedges the whole server, not just the session that asked
+ * — so a config regression or an OpenCode-side path that raises the event
+ * before consulting permission must never be able to leave a question
+ * unanswered, no matter whose sessionID it carries. Same rule as
+ * `drainPendingQuestions`, so behavior does not depend on which path sees a
+ * question first.
+ */
+export async function handleQuestionAsked(
+  questionClient: QuestionClient,
+  req: { id?: string; sessionID?: string; questions?: unknown[] },
+): Promise<void> {
+  log(`Auto-answering question ${req.id ?? '(no id)'} (sessionID=${req.sessionID ?? 'unknown'})`);
+  await autoAnswerQuestion(questionClient, req);
+}
+
+/**
  * Defensive belt: drain any question requests already pending when a shared
  * runtime comes up (e.g. one that raced the event subscription, or survived
  * from a prior server instance) so none of them can sit there wedging future
  * turns before the event-driven handler ever sees them.
+ *
+ * Bounded the same way `spawnOpencodeServer` bounds its own await: a plain
+ * `Promise.race` against a timer, since (unlike that function's child-process
+ * spawn) there is no cancellable handle on the in-flight SDK calls to abort.
+ * A hung list()/reply() round-trip must not block runtime startup forever —
+ * on timeout this logs one line and returns, fail-open, because the
+ * event-driven `question.asked` handler still answers the question later if
+ * the round-trip eventually completes.
  */
-export async function drainPendingQuestions(questionClient: QuestionClient): Promise<void> {
-  try {
-    const res = await questionClient.question.list();
-    if (res.error) {
-      log(`Failed to list pending questions: ${JSON.stringify(res.error)}`);
-      return;
+export async function drainPendingQuestions(
+  questionClient: QuestionClient,
+  timeoutMs = DRAIN_PENDING_QUESTIONS_TIMEOUT_MS,
+): Promise<void> {
+  const drain = (async () => {
+    try {
+      const res = await questionClient.question.list();
+      if (res.error) {
+        log(`Failed to list pending questions: ${JSON.stringify(res.error)}`);
+        return;
+      }
+      for (const req of res.data ?? []) {
+        await autoAnswerQuestion(questionClient, req);
+      }
+    } catch (err) {
+      log(`Failed to list pending questions: ${err instanceof Error ? err.message : String(err)}`);
     }
-    for (const req of res.data ?? []) {
-      await autoAnswerQuestion(questionClient, req);
-    }
-  } catch (err) {
-    log(`Failed to list pending questions: ${err instanceof Error ? err.message : String(err)}`);
+  })();
+
+  const timedOut = new Promise<true>((resolve) => {
+    setTimeout(() => resolve(true), timeoutMs);
+  });
+
+  if (await Promise.race([drain.then(() => false as const), timedOut])) {
+    log(`Timed out after ${timeoutMs}ms draining pending questions; continuing startup`);
   }
 }
 
@@ -856,17 +904,8 @@ export class OpenCodeProvider implements AgentProvider {
                 break;
               }
               case 'question.asked': {
-                // The `question: 'deny'` config above should stop this tool
-                // from ever firing, but this is the real fix for the wedge:
-                // whatever raises this event, answer it immediately so the
-                // single shared OpenCode server can never block on it — a
-                // config regression or an OpenCode-side path that raises the
-                // event before consulting permission should not be able to
-                // freeze every subsequent turn again.
                 const req = ev.properties as { id?: string; sessionID?: string; questions?: unknown[] };
-                if (req.sessionID === undefined || req.sessionID === sessionId) {
-                  await autoAnswerQuestion(questionClient, req);
-                }
+                await handleQuestionAsked(questionClient, req);
                 break;
               }
               case 'session.status': {

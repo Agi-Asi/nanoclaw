@@ -177,6 +177,21 @@ function wrapPromptWithContext(text: string, systemInstructions?: string): strin
   return out;
 }
 
+// A limit env var must be a bare positive integer (a token count) — units
+// ("64k"), blank strings, zero, and negatives are rejected rather than
+// coerced: Number() would turn blank into 0 (silently disables compaction,
+// see below) and "64k" into NaN (the emitted config becomes unparseable
+// JSON, and OpenCode fails to start). Invalid input is treated as unset.
+function parseLimitEnv(varName: string, raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed) || Number(trimmed) <= 0) {
+    log(`Ignoring invalid ${varName}: "${raw}"`);
+    return undefined;
+  }
+  return Number(trimmed);
+}
+
 export function buildOpenCodeConfig(options: ProviderOptions): Record<string, unknown> {
   const provider = process.env.OPENCODE_PROVIDER || 'anthropic';
   const model = process.env.OPENCODE_MODEL;
@@ -195,12 +210,14 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
   // Absent these env vars, behavior is unchanged (no `limit` key emitted).
   const contextLimitEnv = process.env.OPENCODE_MODEL_CONTEXT_LIMIT;
   const outputLimitEnv = process.env.OPENCODE_MODEL_OUTPUT_LIMIT;
+  const contextLimit = parseLimitEnv('OPENCODE_MODEL_CONTEXT_LIMIT', contextLimitEnv);
+  const outputLimit = parseLimitEnv('OPENCODE_MODEL_OUTPUT_LIMIT', outputLimitEnv);
+  if (outputLimitEnv !== undefined && contextLimit === undefined) {
+    log('Ignoring OPENCODE_MODEL_OUTPUT_LIMIT: no valid OPENCODE_MODEL_CONTEXT_LIMIT to pair it with');
+  }
   const modelLimit =
-    contextLimitEnv !== undefined
-      ? {
-          context: Number(contextLimitEnv),
-          ...(outputLimitEnv !== undefined ? { output: Number(outputLimitEnv) } : {}),
-        }
+    contextLimit !== undefined
+      ? { context: contextLimit, ...(outputLimit !== undefined ? { output: outputLimit } : {}) }
       : undefined;
 
   // OpenCode drops every non-text file part whose modality the model does not

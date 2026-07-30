@@ -67,28 +67,74 @@ describe('buildOpenCodeConfig provider transport', () => {
 });
 
 describe('buildOpenCodeConfig model limit', () => {
-  it('declares limit.context/output on the registered model when both env vars are set', () => {
+  function limitEnv() {
     process.env.OPENCODE_PROVIDER = 'openai';
     process.env.OPENCODE_MODEL = 'openai/some/local-model';
     process.env.ANTHROPIC_BASE_URL = 'https://inference.example.test/v1';
+  }
+
+  function limit(config: Record<string, unknown>) {
+    const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
+    return (entry.models as Record<string, Record<string, unknown>>)['some/local-model'].limit;
+  }
+
+  // buildOpenCodeConfig logs through console.error (see `log` at the top of
+  // opencode.ts); capture it so the invalid-input tests can assert on the
+  // message instead of just the silent absence of a limit. `spyOn(console,
+  // 'error')` does not intercept calls made from other modules on this Bun
+  // version, so patch the method directly.
+  function captureErrors(fn: () => Record<string, unknown>) {
+    const messages: string[] = [];
+    const original = console.error;
+    console.error = ((...args: unknown[]) => {
+      messages.push(String(args[0]));
+    }) as typeof console.error;
+    try {
+      return { config: fn(), messages };
+    } finally {
+      console.error = original;
+    }
+  }
+
+  it('declares limit.context/output on the registered model when both env vars are set', () => {
+    limitEnv();
     process.env.OPENCODE_MODEL_CONTEXT_LIMIT = '65536';
     process.env.OPENCODE_MODEL_OUTPUT_LIMIT = '8192';
     const config = buildOpenCodeConfig({});
-    const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
-    const models = entry.models as Record<string, Record<string, unknown>>;
-    expect(models['some/local-model'].limit).toEqual({ context: 65536, output: 8192 });
+    expect(limit(config)).toEqual({ context: 65536, output: 8192 });
   });
 
   it('omits limit when the env vars are unset', () => {
-    process.env.OPENCODE_PROVIDER = 'openai';
-    process.env.OPENCODE_MODEL = 'openai/some/local-model';
-    process.env.ANTHROPIC_BASE_URL = 'https://inference.example.test/v1';
+    limitEnv();
     delete process.env.OPENCODE_MODEL_CONTEXT_LIMIT;
     delete process.env.OPENCODE_MODEL_OUTPUT_LIMIT;
     const config = buildOpenCodeConfig({});
-    const entry = (config.provider as Record<string, Record<string, unknown>>).openai;
-    const models = entry.models as Record<string, Record<string, unknown>>;
-    expect(models['some/local-model'].limit).toBeUndefined();
+    expect(limit(config)).toBeUndefined();
+  });
+
+  it.each([[' '], ['64k'], ['0'], ['-5']])(
+    'rejects OPENCODE_MODEL_CONTEXT_LIMIT=%p, omits limit, and logs the rejection',
+    (value) => {
+      limitEnv();
+      process.env.OPENCODE_MODEL_CONTEXT_LIMIT = value;
+      delete process.env.OPENCODE_MODEL_OUTPUT_LIMIT;
+      const { config, messages } = captureErrors(() => buildOpenCodeConfig({}));
+      expect(limit(config)).toBeUndefined();
+      expect(messages.some((m) => m.includes('Ignoring invalid OPENCODE_MODEL_CONTEXT_LIMIT'))).toBe(true);
+    },
+  );
+
+  it('ignores a set OPENCODE_MODEL_OUTPUT_LIMIT when there is no valid context limit, and logs it', () => {
+    limitEnv();
+    delete process.env.OPENCODE_MODEL_CONTEXT_LIMIT;
+    process.env.OPENCODE_MODEL_OUTPUT_LIMIT = '8192';
+    const { config, messages } = captureErrors(() => buildOpenCodeConfig({}));
+    expect(limit(config)).toBeUndefined();
+    expect(
+      messages.some(
+        (m) => m.includes('Ignoring OPENCODE_MODEL_OUTPUT_LIMIT') && m.includes('OPENCODE_MODEL_CONTEXT_LIMIT'),
+      ),
+    ).toBe(true);
   });
 });
 

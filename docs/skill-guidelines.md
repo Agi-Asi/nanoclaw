@@ -6,11 +6,15 @@ The authoritative checklist for writing a NanoClaw skill: the bar that conforman
 
 ## Principles
 
-Every customization is an additive **skill**: not an edit buried in core, but a skill that carries its own code and knows how to install and remove itself. Two principles make a skill *maintainable*; everything else in this document follows from them.
+Every customization is an additive **skill**: not an edit buried in core, but a skill that carries its own code and knows how to install and remove itself. Three principles make a skill *maintainable*; everything else in this document follows from them.
 
-### 1. Minimal integration surface
+### 1. Single responsibility
 
-A skill adds files and makes the **smallest possible reach-ins** into existing code. Adding a file or a dependency never breaks on upgrade; reaching into existing code is the only thing that does, so the integration surface *is* the upgrade risk. Keep reach-ins few, tiny, and ideally a single line that *calls* into the skill's own code.
+A skill provides one independently useful customization and has one cohesive reason to change. Split customizations users can install or remove independently; keep one workflow together when its parts only make sense as a whole.
+
+### 2. Open for extension, closed for modification
+
+A skill extends NanoClaw through skill-owned files and existing extension points, keeping working core code unchanged whenever possible. When an edit is unavoidable, make the **smallest possible reach-in**. Adding a file or a dependency never breaks on upgrade; reaching into existing code is the only thing that does, so the integration surface *is* the upgrade risk.
 
 Follows from this:
 
@@ -19,7 +23,7 @@ Follows from this:
 - **Colocated, self-contained** edits over edits in two places.
 - **Use an existing registry or hook when there is one**: appending to a registry is a smaller surface than reaching into code. When none exists, a true code-level edit is fine and first-class. (Whether to *add* a hook because a spot has become a hotspot is the maintainer's call, not the skill's.)
 
-### 2. A test for every functional integration point
+### 3. A test for every functional integration point
 
 Every reach-in with a **functional consequence** gets a test that goes **red if the wiring is deleted or drifts**. That's what protects the fork from upstream changes. The tests are also the verification: there is no separate "verify" step.
 
@@ -31,7 +35,7 @@ Follows from this:
 - **The test lives where the point runs**: host code uses vitest under `src/`; container code uses `bun:test` under `container/agent-runner/`.
 - **"Functional" is the filter**: weigh a reach-in by what breaks if it's gone. A cosmetic one (raising a log line's level) gets no test.
 
-The two interlock: a minimal surface keeps the integration points few and testable; a test per point keeps the surface safe. *Maintainable = small surface, every functional point guarded.*
+Together they define a maintainable skill: focused responsibility, a small integration surface, and every functional point guarded.
 
 ---
 

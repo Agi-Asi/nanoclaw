@@ -130,6 +130,7 @@ Two consequences. First, **don't mock the adapter's package in the shipped test*
 The test matches the kind of integration point:
 
 - **In-process seam with core** (a channel into the router, a pusher into the central DB): drive the real added component against the **real core collaborators** (DB, registry, router), faking only the external edge. The highest-value archetype: it exercises the added file's consumption of core, which is what catches core drift.
+- **Module migration**: import the real modules barrel, initialize a real test DB, call `runMigrations()` with its default combined list, then exercise the skill's actual DB behavior. Do not pass an explicit migration list or import the skill migration directly: either bypasses the core migrations that must participate for an incompatible upstream schema change to make the composed skill test fail.
 - **Wiring / registration** (a barrel import, a `main()` call, an entry in an `mcpServers` map): behavior test via the registry where queryable (see above); structural / AST test where not.
 - **Config / container probe** (mounts, Dockerfile, a tool installed in the image): run the change where you can. Spin up a container to confirm a mount or binary. Checking that a line exists in a file is the last resort.
 - **Agentic run** (operational, instruction-only skills): run the workflow with a small model; did it complete?

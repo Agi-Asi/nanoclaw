@@ -84,6 +84,8 @@ For a fence-carrying skill, conformance means:
 
 The integration point is wherever the skill reaches into existing code. Make it **minimal, colocated, and self-contained**:
 
+Lifecycle hooks are operational boundaries: an `onHostStart` error aborts host startup, while shutdown callback errors are logged and remaining cleanup continues.
+
 - All real logic lives in the skill's own file behind a single entry function; the edit to core is just the call.
 - **Prefer one colocated block** over edits in two places. For an inserted call, a dynamic import at the call site keeps the import and call together and avoids touching the top-of-file import block (itself a merge hotspot):
 

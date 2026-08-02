@@ -39,6 +39,7 @@ import { DATA_DIR } from '../config.js';
 import { getMessagingGroupsByChannel, updateMessagingGroup } from '../db/messaging-groups.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
+import type { MessagingGroup, UnknownSenderPolicy } from '../types.js';
 import { getOwners, grantRole, hasAnyOwner } from '../modules/permissions/db/user-roles.js';
 import { upsertUser } from '../modules/permissions/db/users.js';
 
@@ -102,13 +103,15 @@ exit 0
 }
 
 /**
- * Public line: the number is one shared, threaded conversation. `public`
- * admits every sender (no per-sender approval); `threads: true` gives each
- * correspondent their own thread/session so replies route back correctly.
+ * `threads: true` gives each correspondent their own thread/session so replies
+ * route back correctly. `strict` is the safe default for creation — the
+ * operator picks owner-only or public during setup and the adapter reconciles
+ * the line to that choice (see inboundPolicy), so a line is never briefly
+ * open to everyone before the choice is applied.
  */
 const DIAL_DEFAULTS: ChannelDefaults = {
-  dm: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'public' },
-  group: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'public' },
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'strict' },
+  group: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'strict' },
   mentions: 'dm-only',
 };
 
@@ -116,6 +119,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
   const client = new DialClient({ apiKey: config.apiKey });
   const spoolDir = path.join(DATA_DIR, 'dial', 'inbound');
   const handlerPath = path.join(DATA_DIR, 'dial', 'handle-dial-event.sh');
+  const policyPath = path.join(DATA_DIR, 'dial', 'inbound-policy.json');
   // The account's default Dial number, used as the fallback line when an
   // inbound event doesn't name the number it arrived on. Each event's actual
   // destination number (data.to) takes precedence, so the adapter serves every
@@ -195,13 +199,37 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
    */
   function ensureLinesAreGroups(): void {
     try {
+      const wanted = inboundPolicy();
       for (const mg of getMessagingGroupsByChannel('dial')) {
-        if (mg.is_group === 1) continue;
-        updateMessagingGroup(mg.id, { is_group: 1 });
-        log.info('Dial: marked line as a shared room', { platformId: mg.platform_id });
+        const updates: Partial<Pick<MessagingGroup, 'is_group' | 'unknown_sender_policy'>> = {};
+        if (mg.is_group !== 1) updates.is_group = 1;
+        if (mg.unknown_sender_policy !== wanted) updates.unknown_sender_policy = wanted;
+        if (Object.keys(updates).length === 0) continue;
+        updateMessagingGroup(mg.id, updates);
+        log.info('Dial: reconciled line', { platformId: mg.platform_id, ...updates });
       }
     } catch (err) {
-      log.warn('Dial: could not verify line grouping — correspondents may share one session', { err });
+      log.warn('Dial: could not reconcile the line — correspondents may share one session', { err });
+    }
+  }
+
+  /**
+   * Who may text this line, chosen by the operator during setup and saved by
+   * the add-dial skill. `strict` admits only the paired owner (and anyone
+   * explicitly granted membership); `public` admits everyone.
+   *
+   * Defaults to `strict` when the file is missing: a phone number is guessable,
+   * and an admitted sender gets a turn with an agent holding account-scoped
+   * Dial credentials. Opting into `public` is the operator's call, not ours.
+   */
+  function inboundPolicy(): UnknownSenderPolicy {
+    if (!fs.existsSync(policyPath)) return 'strict';
+    try {
+      const parsed = JSON.parse(fs.readFileSync(policyPath, 'utf8')) as { inboundAccess?: string };
+      return parsed.inboundAccess === 'public' ? 'public' : 'strict';
+    } catch (err) {
+      log.warn('Dial: unreadable inbound-policy file, keeping the line owner-only', { policyPath, err });
+      return 'strict';
     }
   }
 

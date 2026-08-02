@@ -10,7 +10,7 @@
  *     daemon runs a spool handler per event; the adapter watches the spool
  *     directory and routes each event.
  *
- * PUBLIC-LINE MODEL. The Dial number is one shared conversation (a single
+ * PUBLIC-LINE MODEL. The Dial number is one room shared by many people (a
  * messaging group whose platform_id is the number itself), and each remote
  * correspondent is a THREAD inside it (threadId = their E.164). One wiring +
  * `unknown_sender_policy: 'public'` therefore lets anyone text/call the number
@@ -18,6 +18,9 @@
  * to the right person via their thread. Ownership is bootstrapped by a pairing
  * code (see dial-pairing.ts): the operator texts a 4-digit code to the number,
  * the interceptor records their number as owner before it reaches an agent.
+ *
+ * Unlike other channels one platform_id serves many correspondents, so the
+ * line must be a group: per-thread sessions are what keep them apart.
  *
  * Credentials come from Dial's auth file (written by `dial onboard`). If
  * there's no key the factory returns null and the channel is skipped.
@@ -33,9 +36,10 @@ import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, Out
 import { registerChannelAdapter } from './channel-registry.js';
 import { tryConsume } from './dial-pairing.js';
 import { DATA_DIR } from '../config.js';
+import { getMessagingGroupsByChannel, updateMessagingGroup } from '../db/messaging-groups.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
-import { grantRole, hasAnyOwner } from '../modules/permissions/db/user-roles.js';
+import { getOwners, grantRole, hasAnyOwner } from '../modules/permissions/db/user-roles.js';
 import { upsertUser } from '../modules/permissions/db/users.js';
 
 /** Longest SMS body sent in one shot; longer text is chunked. */
@@ -183,6 +187,35 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     return true;
   }
 
+  /**
+   * `is_group` is only written when the row is created, so a line registered
+   * before its first message stays a DM — which collapses every correspondent
+   * into one shared session. Runs per event, not just at startup: the line is
+   * usually registered after the adapter connects. Also repairs older installs.
+   */
+  function ensureLinesAreGroups(): void {
+    try {
+      for (const mg of getMessagingGroupsByChannel('dial')) {
+        if (mg.is_group === 1) continue;
+        updateMessagingGroup(mg.id, { is_group: 1 });
+        log.info('Dial: marked line as a shared room', { platformId: mg.platform_id });
+      }
+    } catch (err) {
+      log.warn('Dial: could not verify line grouping — correspondents may share one session', { err });
+    }
+  }
+
+  /** The paired operator's E.164, or '' if the install has no Dial owner yet. */
+  function ownerNumber(): string {
+    try {
+      const owner = getOwners().find((r) => r.user_id.startsWith('dial:'));
+      return owner ? owner.user_id.slice('dial:'.length) : '';
+    } catch (err) {
+      log.warn('Dial: could not resolve the paired owner', { err });
+      return '';
+    }
+  }
+
   /** Route one inbound event — SMS text and ended-call notifications. */
   async function routeEvent(env: DialEventEnvelope): Promise<void> {
     if (!setup) return;
@@ -205,15 +238,28 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       if (peer && (await consumePairing(peer, text, eventLine || line))) return;
     } else if (env.type === 'call.ended') {
       const outbound = data.direction === 'outbound';
-      const other = outbound ? data.to : data.from;
-      peer = typeof other === 'string' ? other : '';
       const mine = outbound ? data.from : data.to;
       eventLine = typeof mine === 'string' ? mine : '';
+      const callee = typeof data.to === 'string' ? data.to : '';
+
+      if (outbound) {
+        // The outcome belongs to the operator who asked for the call, not to
+        // the person we dialled.
+        peer = ownerNumber();
+        if (!peer) {
+          log.warn('Dial: outbound call ended but no paired owner to notify — dropping event', { callee });
+          return;
+        }
+      } else {
+        peer = typeof data.from === 'string' ? data.from : '';
+      }
+
       const dur = typeof data.durationSeconds === 'number' ? `, ${data.durationSeconds}s` : '';
       const callId = typeof data.callId === 'string' ? data.callId : '';
       const transcript =
         data.transcriptAvailable && callId ? ` Run \`dial call get ${callId}\` for the transcript.` : '';
-      text = `[Voice call ${outbound ? 'outbound' : 'inbound'} ${data.status ?? 'ended'}${data.canceled ? ' (canceled)' : ''}${dur}.${transcript}]`;
+      const to = outbound && callee ? ` to ${callee}` : '';
+      text = `[Voice call ${outbound ? 'outbound' : 'inbound'}${to} ${data.status ?? 'ended'}${data.canceled ? ' (canceled)' : ''}${dur}.${transcript}]`;
     } else {
       return;
     }
@@ -228,12 +274,14 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     const activeLine = eventLine || line;
     const platformId = activeLine || peer;
     const threadId = activeLine ? peer : null;
+    ensureLinesAreGroups();
     const msg: InboundMessage = {
       id: id ?? peer,
       kind: 'chat',
       content: { text, sender: peer, senderId: `dial:${peer}`, senderName: peer },
       isMention: true,
-      isGroup: false,
+      // One line serves many people; a DM would collapse them into one session.
+      isGroup: true,
       timestamp: env.createdAt || new Date().toISOString(),
     };
     void Promise.resolve(setup.onInbound(platformId, threadId, msg)).catch((err) =>
@@ -323,6 +371,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
 
     async setup(cfg: ChannelSetup): Promise<void> {
       setup = cfg;
+      ensureLinesAreGroups();
       fs.mkdirSync(spoolDir, { recursive: true });
       ensureCommandTarget();
 

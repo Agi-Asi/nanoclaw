@@ -98,7 +98,7 @@ These are the verbs you will most often compose. Read the relevant `.md` page fo
 ## Conventions
 
 - `--json` everywhere for parseable output.
-- **Never choose which number to send or call from.** Omit `--from-number` and `--from-number-id`: the CLI's saved default is the line this install is wired to, and messages sent through your normal reply path already go out from it. Do **not** run `dial number list` to pick a sender — on an account with several numbers the list is ordered newest-first, which is unrelated to the wired line, so picking from it sends from a number nobody is listening on. Pass `--from-number <id|E.164|nickname>` only when the user names a specific number themselves.
+- **Always pass `--from-number` with this install's wired line** (stated at the end of this file if the channel is set up). This sandbox has no saved default sender — `defaultNumberId` is null here — so an omitted selector fails outright. Never pick one from `dial number list` instead: on a multi-number account that list is ordered newest-first, which is unrelated to the line this install is wired to, so a number chosen from it reaches nobody and replies to it are dropped. If no line is stated below and the user hasn't named one, ask rather than guess.
 - Phone numbers are E.164 (`+14155550123`). Reject anything else before calling Dial.
 - Writes (`message`, `call`, `number purchase`) are **not idempotent** — on an ambiguous failure, list first to check before retrying.
 - The local API key lives at `~/.local/share/dial/auth.json` (mode 0600). The CLI reads it automatically; never echo it back to the user or paste it into responses.

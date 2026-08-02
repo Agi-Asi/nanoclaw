@@ -120,11 +120,11 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
   const spoolDir = path.join(DATA_DIR, 'dial', 'inbound');
   const handlerPath = path.join(DATA_DIR, 'dial', 'handle-dial-event.sh');
   const policyPath = path.join(DATA_DIR, 'dial', 'inbound-policy.json');
-  // The account's default Dial number, used as the fallback line when an
-  // inbound event doesn't name the number it arrived on. Each event's actual
-  // destination number (data.to) takes precedence, so the adapter serves every
-  // number on the account, not just this one.
-  const line = config.fromNumber;
+  // Fallback line for events that don't name the number they arrived on. Each
+  // event's actual destination (data.to) takes precedence, so the adapter
+  // serves every number on the account, not just this one. Resolved lazily via
+  // wiredLine() because the group doesn't exist yet when the adapter connects.
+  const line = (): string => wiredLine();
 
   let setup: ChannelSetup | null = null;
   let connected = false;
@@ -143,9 +143,9 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
 
   async function sendSms(to: string, body: string, from?: string): Promise<string | undefined> {
     // Send from the number the conversation is on (`from`); fall back to the
-    // account default. This is what lets one adapter serve multiple Dial
-    // numbers — each reply goes out from the number the person actually texted.
-    const fromNumber = from || config.fromNumber;
+    // wired line. This is what lets one adapter serve multiple Dial numbers —
+    // each reply goes out from the number the person actually texted.
+    const fromNumber = from || wiredLine();
     let lastId: string | undefined;
     for (const chunk of body.length <= MAX_CHUNK ? [body] : chunkText(body, MAX_CHUNK)) {
       const sent = await client.sendMessage({
@@ -233,6 +233,22 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     }
   }
 
+  /**
+   * The line this install is wired to. `config.fromNumber` comes from the auth
+   * file, which `dial onboard` fills with the account's oldest number — not
+   * necessarily the one setup wired — so prefer the registered group's own
+   * platform_id and keep auth only as a pre-registration fallback.
+   */
+  function wiredLine(): string {
+    try {
+      const groups = getMessagingGroupsByChannel('dial');
+      if (groups.length === 1) return groups[0].platform_id;
+    } catch (err) {
+      log.warn('Dial: could not resolve the wired line', { err });
+    }
+    return config.fromNumber;
+  }
+
   /** The paired operator's E.164, or '' if the install has no Dial owner yet. */
   function ownerNumber(): string {
     try {
@@ -263,7 +279,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       text = typeof data.body === 'string' ? data.body : '';
       // Pairing codes are consumed before any agent sees them. Confirm from the
       // number the code was sent to (falls back to the account default).
-      if (peer && (await consumePairing(peer, text, eventLine || line))) return;
+      if (peer && (await consumePairing(peer, text, eventLine || line()))) return;
     } else if (env.type === 'call.ended') {
       const outbound = data.direction === 'outbound';
       const mine = outbound ? data.from : data.to;
@@ -299,7 +315,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     // (public) wiring. `eventLine` is the number this event hit; fall back to the
     // account default when the event omits it (keeps single-number installs
     // unchanged).
-    const activeLine = eventLine || line;
+    const activeLine = eventLine || line();
     const platformId = activeLine || peer;
     const threadId = activeLine ? peer : null;
     ensureLinesAreGroups();

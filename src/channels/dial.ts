@@ -10,7 +10,7 @@
  *     daemon runs a spool handler per event; the adapter watches the spool
  *     directory and routes each event.
  *
- * PUBLIC-LINE MODEL. The Dial number is one shared conversation (a single
+ * PUBLIC-LINE MODEL. The Dial number is one room shared by many people (a
  * messaging group whose platform_id is the number itself), and each remote
  * correspondent is a THREAD inside it (threadId = their E.164). One wiring +
  * `unknown_sender_policy: 'public'` therefore lets anyone text/call the number
@@ -18,6 +18,9 @@
  * to the right person via their thread. Ownership is bootstrapped by a pairing
  * code (see dial-pairing.ts): the operator texts a 4-digit code to the number,
  * the interceptor records their number as owner before it reaches an agent.
+ *
+ * Unlike other channels one platform_id serves many correspondents, so the
+ * line must be a group: per-thread sessions are what keep them apart.
  *
  * Credentials come from Dial's auth file (written by `dial onboard`). If
  * there's no key the factory returns null and the channel is skipped.
@@ -33,9 +36,11 @@ import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, Out
 import { registerChannelAdapter } from './channel-registry.js';
 import { tryConsume } from './dial-pairing.js';
 import { DATA_DIR } from '../config.js';
+import { getMessagingGroupsByChannel, updateMessagingGroup } from '../db/messaging-groups.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
-import { grantRole, hasAnyOwner } from '../modules/permissions/db/user-roles.js';
+import type { MessagingGroup, UnknownSenderPolicy } from '../types.js';
+import { getOwners, grantRole, hasAnyOwner } from '../modules/permissions/db/user-roles.js';
 import { upsertUser } from '../modules/permissions/db/users.js';
 
 /** Longest SMS body sent in one shot; longer text is chunked. */
@@ -98,13 +103,15 @@ exit 0
 }
 
 /**
- * Public line: the number is one shared, threaded conversation. `public`
- * admits every sender (no per-sender approval); `threads: true` gives each
- * correspondent their own thread/session so replies route back correctly.
+ * `threads: true` gives each correspondent their own thread/session so replies
+ * route back correctly. `strict` is the safe default for creation — the
+ * operator picks owner-only or public during setup and the adapter reconciles
+ * the line to that choice (see inboundPolicy), so a line is never briefly
+ * open to everyone before the choice is applied.
  */
 const DIAL_DEFAULTS: ChannelDefaults = {
-  dm: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'public' },
-  group: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'public' },
+  dm: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'strict' },
+  group: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'strict' },
   mentions: 'dm-only',
 };
 
@@ -112,11 +119,12 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
   const client = new DialClient({ apiKey: config.apiKey });
   const spoolDir = path.join(DATA_DIR, 'dial', 'inbound');
   const handlerPath = path.join(DATA_DIR, 'dial', 'handle-dial-event.sh');
-  // The account's default Dial number, used as the fallback line when an
-  // inbound event doesn't name the number it arrived on. Each event's actual
-  // destination number (data.to) takes precedence, so the adapter serves every
-  // number on the account, not just this one.
-  const line = config.fromNumber;
+  const policyPath = path.join(DATA_DIR, 'dial', 'inbound-policy.json');
+  // Fallback line for events that don't name the number they arrived on. Each
+  // event's actual destination (data.to) takes precedence, so the adapter
+  // serves every number on the account, not just this one. Resolved lazily via
+  // wiredLine() because the group doesn't exist yet when the adapter connects.
+  const line = (): string => wiredLine();
 
   let setup: ChannelSetup | null = null;
   let connected = false;
@@ -135,9 +143,9 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
 
   async function sendSms(to: string, body: string, from?: string): Promise<string | undefined> {
     // Send from the number the conversation is on (`from`); fall back to the
-    // account default. This is what lets one adapter serve multiple Dial
-    // numbers — each reply goes out from the number the person actually texted.
-    const fromNumber = from || config.fromNumber;
+    // wired line. This is what lets one adapter serve multiple Dial numbers —
+    // each reply goes out from the number the person actually texted.
+    const fromNumber = from || wiredLine();
     let lastId: string | undefined;
     for (const chunk of body.length <= MAX_CHUNK ? [body] : chunkText(body, MAX_CHUNK)) {
       const sent = await client.sendMessage({
@@ -183,6 +191,75 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     return true;
   }
 
+  /**
+   * `is_group` is only written when the row is created, so a line registered
+   * before its first message stays a DM — which collapses every correspondent
+   * into one shared session. Runs per event, not just at startup: the line is
+   * usually registered after the adapter connects. Also repairs older installs.
+   */
+  function ensureLinesAreGroups(): void {
+    try {
+      const wanted = inboundPolicy();
+      for (const mg of getMessagingGroupsByChannel('dial')) {
+        const updates: Partial<Pick<MessagingGroup, 'is_group' | 'unknown_sender_policy'>> = {};
+        if (mg.is_group !== 1) updates.is_group = 1;
+        if (mg.unknown_sender_policy !== wanted) updates.unknown_sender_policy = wanted;
+        if (Object.keys(updates).length === 0) continue;
+        updateMessagingGroup(mg.id, updates);
+        log.info('Dial: reconciled line', { platformId: mg.platform_id, ...updates });
+      }
+    } catch (err) {
+      log.warn('Dial: could not reconcile the line — correspondents may share one session', { err });
+    }
+  }
+
+  /**
+   * Who may text this line, chosen by the operator during setup and saved by
+   * the add-dial skill. `strict` admits only the paired owner (and anyone
+   * explicitly granted membership); `public` admits everyone.
+   *
+   * Defaults to `strict` when the file is missing: a phone number is guessable,
+   * and an admitted sender gets a turn with an agent holding account-scoped
+   * Dial credentials. Opting into `public` is the operator's call, not ours.
+   */
+  function inboundPolicy(): UnknownSenderPolicy {
+    if (!fs.existsSync(policyPath)) return 'strict';
+    try {
+      const parsed = JSON.parse(fs.readFileSync(policyPath, 'utf8')) as { inboundAccess?: string };
+      return parsed.inboundAccess === 'public' ? 'public' : 'strict';
+    } catch (err) {
+      log.warn('Dial: unreadable inbound-policy file, keeping the line owner-only', { policyPath, err });
+      return 'strict';
+    }
+  }
+
+  /**
+   * The line this install is wired to. `config.fromNumber` comes from the auth
+   * file, which `dial onboard` fills with the account's oldest number — not
+   * necessarily the one setup wired — so prefer the registered group's own
+   * platform_id and keep auth only as a pre-registration fallback.
+   */
+  function wiredLine(): string {
+    try {
+      const groups = getMessagingGroupsByChannel('dial');
+      if (groups.length === 1) return groups[0].platform_id;
+    } catch (err) {
+      log.warn('Dial: could not resolve the wired line', { err });
+    }
+    return config.fromNumber;
+  }
+
+  /** The paired operator's E.164, or '' if the install has no Dial owner yet. */
+  function ownerNumber(): string {
+    try {
+      const owner = getOwners().find((r) => r.user_id.startsWith('dial:'));
+      return owner ? owner.user_id.slice('dial:'.length) : '';
+    } catch (err) {
+      log.warn('Dial: could not resolve the paired owner', { err });
+      return '';
+    }
+  }
+
   /** Route one inbound event — SMS text and ended-call notifications. */
   async function routeEvent(env: DialEventEnvelope): Promise<void> {
     if (!setup) return;
@@ -202,18 +279,31 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       text = typeof data.body === 'string' ? data.body : '';
       // Pairing codes are consumed before any agent sees them. Confirm from the
       // number the code was sent to (falls back to the account default).
-      if (peer && (await consumePairing(peer, text, eventLine || line))) return;
+      if (peer && (await consumePairing(peer, text, eventLine || line()))) return;
     } else if (env.type === 'call.ended') {
       const outbound = data.direction === 'outbound';
-      const other = outbound ? data.to : data.from;
-      peer = typeof other === 'string' ? other : '';
       const mine = outbound ? data.from : data.to;
       eventLine = typeof mine === 'string' ? mine : '';
+      const callee = typeof data.to === 'string' ? data.to : '';
+
+      if (outbound) {
+        // The outcome belongs to the operator who asked for the call, not to
+        // the person we dialled.
+        peer = ownerNumber();
+        if (!peer) {
+          log.warn('Dial: outbound call ended but no paired owner to notify — dropping event', { callee });
+          return;
+        }
+      } else {
+        peer = typeof data.from === 'string' ? data.from : '';
+      }
+
       const dur = typeof data.durationSeconds === 'number' ? `, ${data.durationSeconds}s` : '';
       const callId = typeof data.callId === 'string' ? data.callId : '';
       const transcript =
         data.transcriptAvailable && callId ? ` Run \`dial call get ${callId}\` for the transcript.` : '';
-      text = `[Voice call ${outbound ? 'outbound' : 'inbound'} ${data.status ?? 'ended'}${data.canceled ? ' (canceled)' : ''}${dur}.${transcript}]`;
+      const to = outbound && callee ? ` to ${callee}` : '';
+      text = `[Voice call ${outbound ? 'outbound' : 'inbound'}${to} ${data.status ?? 'ended'}${data.canceled ? ' (canceled)' : ''}${dur}.${transcript}]`;
     } else {
       return;
     }
@@ -225,15 +315,17 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     // (public) wiring. `eventLine` is the number this event hit; fall back to the
     // account default when the event omits it (keeps single-number installs
     // unchanged).
-    const activeLine = eventLine || line;
+    const activeLine = eventLine || line();
     const platformId = activeLine || peer;
     const threadId = activeLine ? peer : null;
+    ensureLinesAreGroups();
     const msg: InboundMessage = {
       id: id ?? peer,
       kind: 'chat',
       content: { text, sender: peer, senderId: `dial:${peer}`, senderName: peer },
       isMention: true,
-      isGroup: false,
+      // One line serves many people; a DM would collapse them into one session.
+      isGroup: true,
       timestamp: env.createdAt || new Date().toISOString(),
     };
     void Promise.resolve(setup.onInbound(platformId, threadId, msg)).catch((err) =>
@@ -323,6 +415,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
 
     async setup(cfg: ChannelSetup): Promise<void> {
       setup = cfg;
+      ensureLinesAreGroups();
       fs.mkdirSync(spoolDir, { recursive: true });
       ensureCommandTarget();
 

@@ -41,6 +41,7 @@ import { DATA_DIR } from '../config.js';
 import { getMessagingGroupsByChannel, updateMessagingGroup } from '../db/messaging-groups.js';
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
+import { nanoclawUserAgent } from './dial-user-agent.js';
 import type { MessagingGroup, UnknownSenderPolicy } from '../types.js';
 import { getOwners } from '../modules/permissions/db/user-roles.js';
 import { upsertUser } from '../modules/permissions/db/users.js';
@@ -130,7 +131,7 @@ const DIAL_DEFAULTS: ChannelDefaults = {
 };
 
 export function createDialAdapter(config: DialConfig): ChannelAdapter {
-  const client = new DialClient({ apiKey: config.apiKey });
+  const client = new DialClient({ apiKey: config.apiKey, userAgent: nanoclawUserAgent() });
   const spoolDir = path.join(DATA_DIR, 'dial', 'inbound');
   const handlerPath = path.join(DATA_DIR, 'dial', 'handle-dial-event.sh');
   const policyPath = path.join(DATA_DIR, 'dial', 'inbound-policy.json');
@@ -406,13 +407,19 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       log.warn('Dial: could not write command-target handler', { handlerPath, err });
       return;
     }
+    const cliEnv = { ...process.env, DIAL_USER_AGENT: nanoclawUserAgent() };
     try {
       const listed = execFileSync(config.cliPath, ['local-target', 'list', '--json'], {
         encoding: 'utf8',
         timeout: 15_000,
+        env: cliEnv,
       });
       if (!listed.includes(handlerPath)) {
-        execFileSync(config.cliPath, ['local-target', 'add', 'cmd', handlerPath], { stdio: 'ignore', timeout: 15_000 });
+        execFileSync(config.cliPath, ['local-target', 'add', 'cmd', handlerPath], {
+          stdio: 'ignore',
+          timeout: 15_000,
+          env: cliEnv,
+        });
         log.info('Dial: registered CLI command target', { handlerPath });
       }
     } catch (err) {

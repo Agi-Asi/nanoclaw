@@ -48,8 +48,8 @@ importers:
         specifier: ^1.2.0
         version: 1.2.0
       '@getdial/sdk':
-        specifier: 0.17.0
-        version: 0.17.0(react-native@0.86.0(@babel/core@7.29.7)(react@19.2.5))
+        specifier: 0.21.0
+        version: 0.21.0(react-native@0.86.0(@babel/core@7.29.7)(react@19.2.5))
       '@onecli-sh/sdk':
         specifier: ^0.3.1
         version: 0.3.1
@@ -513,8 +513,8 @@ packages:
     resolution: {integrity: sha512-43/qtrDUokr7LJqoF2c3+RInu/t4zfrpYdoSDfYyhg52rwLV6TnOvdG4fXm7IkSB3wErkcmJS9iEhjVtOSEjjA==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
 
-  '@getdial/sdk@0.17.0':
-    resolution: {integrity: sha512-pmduS63YbYs+Rl3jPIHAiji2fEF/ZPG53i5VLURmuKE/zgTOB5wSF95QwcIwVYANi7m+SEeZFWqUAd5w8XtdhA==}
+  '@getdial/sdk@0.21.0':
+    resolution: {integrity: sha512-C4Zn3aHCwKeWmlJF6LtW6rEcaGz5LiDEiNESwRB8yXhH0a1oUc7LuQw8VxowTc/LArpLrzqkJr6vrVZjyGIeyw==}
 
   '@googleapis/chat@44.6.0':
     resolution: {integrity: sha512-Bnqzev/bSTXSbE0/N2WS4Stnleo8j9bJJ1LkCBk1fXQnehcArVMv7q543rzPYU6MJql4D34On6diNGAuYtI9xQ==}
@@ -1617,6 +1617,7 @@ packages:
 
   audio-decode@2.2.3:
     resolution: {integrity: sha512-Z0lHvMayR/Pad9+O9ddzaBJE0DrhZkQlStrC1RwcAHF3AhQAsdwKHeLGK8fYKyp2DDU6xHxzGb4CLMui12yVrg==}
+    deprecated: Renamed to @audio/decode — same API; this name remains a thin alias. npm i @audio/decode
 
   audio-type@2.4.1:
     resolution: {integrity: sha512-dK9Z/P83C/rBfTrXXgPD3jZ+aXxx2o/P4rq8+H1JqxbXklitEeJw4CrcwMC5CkON3CX3yy2gaWnIEVYejYh0zQ==}
@@ -4651,7 +4652,7 @@ snapshots:
       '@eslint/core': 0.17.0
       levn: 0.4.1
 
-  '@getdial/sdk@0.17.0(react-native@0.86.0(@babel/core@7.29.7)(react@19.2.5))':
+  '@getdial/sdk@0.21.0(react-native@0.86.0(@babel/core@7.29.7)(react@19.2.5))':
     dependencies:
       pubnub: 11.0.2(react-native@0.86.0(@babel/core@7.29.7)(react@19.2.5))
       zod: 4.4.3

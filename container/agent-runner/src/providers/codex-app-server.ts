@@ -3,6 +3,8 @@ import path from 'path';
 import { spawn, type ChildProcess } from 'child_process';
 import { createInterface, type Interface as ReadlineInterface } from 'readline';
 
+import type { McpServerConfig } from './types.js';
+
 // Cap Codex's project-doc loading (AGENTS.md). The host-side composer
 // (src/providers/codex-agents-md.ts) enforces the same cap at compose time —
 // host and container share no modules, so the constant lives in both.
@@ -61,12 +63,6 @@ export interface AppServer {
    * already taken the server's stderr with it.
    */
   exitHandlers: Array<(err: Error) => void>;
-}
-
-export interface CodexMcpServer {
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
 }
 
 export type CodexReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
@@ -381,7 +377,7 @@ export function attachCodexAutoApproval(server: AppServer): void {
 }
 
 export function writeCodexConfigToml(
-  servers: Record<string, CodexMcpServer>,
+  servers: Record<string, McpServerConfig>,
   memorySessionHook: CodexMemorySessionHook,
   opts: { model?: string; effort?: string } = {},
 ): void {
@@ -412,6 +408,18 @@ export function writeCodexConfigToml(
 
   for (const [name, config] of Object.entries(servers)) {
     lines.push(`[mcp_servers.${name}]`);
+    if (config.type === 'http') {
+      lines.push(`url = ${tomlBasicString(config.url)}`);
+      if (config.headers && Object.keys(config.headers).length > 0) {
+        lines.push(`[mcp_servers.${name}.http_headers]`);
+        for (const [key, value] of Object.entries(config.headers)) {
+          lines.push(`${tomlBasicString(key)} = ${tomlBasicString(value)}`);
+        }
+      }
+      lines.push('');
+      continue;
+    }
+
     lines.push(`command = ${tomlBasicString(config.command)}`);
     if (config.args && config.args.length > 0) {
       lines.push(`args = [${config.args.map(tomlBasicString).join(', ')}]`);

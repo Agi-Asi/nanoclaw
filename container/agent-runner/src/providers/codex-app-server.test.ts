@@ -50,6 +50,11 @@ describe('Codex config TOML', () => {
           args: ['run', '/app/src/mcp-tools/index.ts'],
           env: { FOO: 'bar' },
         },
+        docs: {
+          type: 'http',
+          url: 'https://mcp.example.com/mcp',
+          headers: { 'X-Api-Version': '2024-06' },
+        },
       },
       MEMORY_SESSION_HOOK,
       { model: 'gpt-5', effort: 'medium' },
@@ -70,6 +75,9 @@ describe('Codex config TOML', () => {
     expect(content).toContain('args = ["run", "/app/src/mcp-tools/index.ts"]');
     expect(content).toContain('[mcp_servers.nanoclaw.env]');
     expect(content).toContain('FOO = "bar"');
+    expect(content).toContain(
+      '[mcp_servers.docs]\nurl = "https://mcp.example.com/mcp"\n[mcp_servers.docs.http_headers]\n"X-Api-Version" = "2024-06"',
+    );
 
     const hooks = JSON.parse(fs.readFileSync(path.join(tmpHome, '.codex', 'hooks.json'), 'utf-8'));
     expect(hooks.hooks.SessionStart).toEqual([

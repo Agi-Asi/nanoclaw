@@ -183,3 +183,27 @@ describe('orderMounts', () => {
     expect(depth('/workspace/outbox')).toBe(depth('/workspace/inbox'));
   });
 });
+
+describe('mount-source and allowlist overlap', () => {
+  beforeEach(() => {
+    fs.rmSync(TEST_DATA_DIR, { recursive: true, force: true });
+    fs.rmSync(TEST_GROUPS_DIR, { recursive: true, force: true });
+    fs.mkdirSync(TEST_DATA_DIR, { recursive: true });
+    fs.mkdirSync(TEST_GROUPS_DIR, { recursive: true });
+    runMigrations(initTestDb());
+    createAgentGroup(GROUP);
+    initGroupFilesystem(GROUP);
+    initSessionFolder(GROUP.id, SESSION.id);
+  });
+  afterEach(() => closeDb());
+
+  it('refuses to compose a mount whose source is no longer the entry we created', () => {
+    const inbox = path.join(TEST_DATA_DIR, 'v2-sessions', GROUP.id, SESSION.id, 'inbox');
+    const elsewhere = path.join(TMP_ROOT, 'elsewhere');
+    fs.mkdirSync(elsewhere, { recursive: true });
+    fs.rmSync(inbox, { recursive: true, force: true });
+    fs.symlinkSync(elsewhere, inbox);
+
+    expect(() => compose()).toThrow(/is not the entry we created/);
+  });
+});

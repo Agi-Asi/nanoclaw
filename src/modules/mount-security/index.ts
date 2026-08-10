@@ -285,12 +285,24 @@ function selfOwnedRoot(realPath: string): string | null {
   for (const [label, root] of roots) {
     const realRoot = getRealPath(root);
     if (realRoot === null) continue;
-    const relative = path.relative(realRoot, realPath);
-    if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+    // Overlap in EITHER direction. Rejecting only "candidate is inside a
+    // protected root" leaves the inverse open, and the inverse is the more
+    // permissive one: an allowlisted ancestor — a home directory, the install
+    // parent, `/` — carries every protected tree beneath it, and re-exposes
+    // them at a second container path with whatever mode the extra requested.
+    // Containment is not directional here; two names for one subtree is the
+    // thing being refused.
+    if (contains(realRoot, realPath) || contains(realPath, realRoot)) {
       return label;
     }
   }
   return null;
+}
+
+/** True if `parent` is `child` itself or an ancestor of it. */
+function contains(parent: string, child: string): boolean {
+  const relative = path.relative(parent, child);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 }
 
 /**

@@ -77,6 +77,17 @@ export function writeTextAtomic(file: string, content: string): void {
   try {
     fs.writeFileSync(tmp, content, { flag: 'wx' });
     fs.renameSync(tmp, file);
+    // `rename(2)` moves the final component without resolving it, so what
+    // lands at `file` is whatever `tmp` was at that moment — and `tmp` shares
+    // a directory with whoever else writes there. An exclusive create makes
+    // the name ours when we take it; it does not keep it ours afterwards.
+    // Publishing anything other than the regular file we just wrote is a
+    // failure, not a result: undo it and say so.
+    const published = fs.lstatSync(file);
+    if (!published.isFile()) {
+      fs.unlinkSync(file);
+      throw new Error(`refusing to publish ${file}: staged entry was replaced before rename`);
+    }
   } finally {
     // The rename consumed it on the happy path; this clears the residue when
     // the write succeeded but the rename did not.

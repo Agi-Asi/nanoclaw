@@ -407,6 +407,11 @@ export function buildMounts(
     mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
   }
 
+  // Every entry composed above is one we materialize; verify each is still the
+  // entry we made before it becomes a bind source. Operator extras and
+  // provider contributions are appended after this and are not ours to judge.
+  for (const m of mounts) assertOwnedSource(m.hostPath, m.containerPath);
+
   // Additional mounts from container config
   if (containerConfig.additionalMounts && containerConfig.additionalMounts.length > 0) {
     const validated = validateAdditionalMounts(containerConfig.additionalMounts, agentGroup.name);
@@ -439,6 +444,21 @@ export function buildMounts(
 export function orderMounts(mounts: VolumeMount[]): VolumeMount[] {
   const depth = (p: string): number => p.split('/').filter(Boolean).length;
   return [...mounts].sort((a, b) => depth(a.containerPath) - depth(b.containerPath));
+}
+
+/**
+ * Sources this function composes and owns. Each is created here or by
+ * `initSessionFolder` / `initGroupFilesystem`, so each should be exactly the
+ * entry we put there — the runtime resolves a bind source at spawn, and a
+ * source that has become a link projects something other than what this table
+ * describes. Checked for the entries we materialize, not for
+ * operator-provided extras, which are the mount allowlist's business.
+ */
+function assertOwnedSource(hostPath: string, containerPath: string): void {
+  const entry = fs.lstatSync(hostPath);
+  if (entry.isSymbolicLink()) {
+    throw new Error(`refusing to mount ${containerPath}: source ${hostPath} is not the entry we created`);
+  }
 }
 
 /**

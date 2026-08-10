@@ -9,7 +9,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { MOUNT_ALLOWLIST_PATH } from '../../config.js';
+import { DATA_DIR, GROUPS_DIR, MOUNT_ALLOWLIST_PATH } from '../../config.js';
 import { log } from '../../log.js';
 
 export interface AdditionalMount {
@@ -271,6 +271,29 @@ function findAllowedRoot(realPath: string, allowedRoots: AllowedRoot[]): Allowed
 }
 
 /**
+ * Name the NanoClaw-owned root a resolved path falls inside, or null.
+ *
+ * Compares resolved paths on both sides so a symlinked allowlist entry cannot
+ * arrive at one of these trees under another name.
+ */
+function selfOwnedRoot(realPath: string): string | null {
+  const roots: Array<[string, string]> = [
+    ['session data directory', DATA_DIR],
+    ['agent group directory', GROUPS_DIR],
+    ['install directory', process.cwd()],
+  ];
+  for (const [label, root] of roots) {
+    const realRoot = getRealPath(root);
+    if (realRoot === null) continue;
+    const relative = path.relative(realRoot, realPath);
+    if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+      return label;
+    }
+  }
+  return null;
+}
+
+/**
  * Validate the container path to prevent escaping /workspace/extra/
  */
 function isValidContainerPath(containerPath: string): boolean {
@@ -348,6 +371,23 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
     return {
       allowed: false,
       reason: `Path matches blocked pattern "${blockedMatch}": "${realPath}"`,
+    };
+  }
+
+  // NanoClaw's own trees are not additional-mount material. `buildMounts`
+  // already composes the session folder, the group folder and the install
+  // surfaces into every container, each with the mode that path is supposed
+  // to have. Naming one of them here would layer a second view over the same
+  // bytes at a different path and a different mode — including one group's
+  // tree inside another group's container — and whichever entry the runtime
+  // applied last would decide. Not operator-configurable, unlike
+  // `blockedPatterns`: there is no deployment in which two disagreeing views
+  // of the same tree is the intent.
+  const selfOwned = selfOwnedRoot(realPath);
+  if (selfOwned !== null) {
+    return {
+      allowed: false,
+      reason: `Path "${realPath}" is inside NanoClaw's own ${selfOwned}; it is already mounted with the modes buildMounts assigns`,
     };
   }
 

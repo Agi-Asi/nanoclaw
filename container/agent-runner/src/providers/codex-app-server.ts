@@ -422,6 +422,13 @@ export function writeCodexConfigToml(
     }
 
     lines.push(`command = ${tomlBasicString(config.command)}`);
+    // Codex launches the stdio server in this directory natively (Stdio
+    // transport `cwd`, present since before the pinned 0.138.0). Arrives
+    // absolute — plugin-mcp.ts resolves the plugin fixed forms first.
+    // Must stay above the [.env] sub-table header or TOML re-parents it.
+    if (config.cwd) {
+      lines.push(`cwd = ${tomlBasicString(config.cwd)}`);
+    }
     if (config.args && config.args.length > 0) {
       lines.push(`args = [${config.args.map(tomlBasicString).join(', ')}]`);
     }

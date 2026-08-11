@@ -407,11 +407,12 @@ export function writeCodexConfigToml(
   lines.push('');
 
   for (const [name, config] of Object.entries(servers)) {
-    lines.push(`[mcp_servers.${name}]`);
+    const tomlName = tomlKey(name);
+    lines.push(`[mcp_servers.${tomlName}]`);
     if (config.type === 'http') {
       lines.push(`url = ${tomlBasicString(config.url)}`);
       if (config.headers && Object.keys(config.headers).length > 0) {
-        lines.push(`[mcp_servers.${name}.http_headers]`);
+        lines.push(`[mcp_servers.${tomlName}.http_headers]`);
         for (const [key, value] of Object.entries(config.headers)) {
           lines.push(`${tomlBasicString(key)} = ${tomlBasicString(value)}`);
         }
@@ -425,9 +426,9 @@ export function writeCodexConfigToml(
       lines.push(`args = [${config.args.map(tomlBasicString).join(', ')}]`);
     }
     if (config.env && Object.keys(config.env).length > 0) {
-      lines.push(`[mcp_servers.${name}.env]`);
+      lines.push(`[mcp_servers.${tomlName}.env]`);
       for (const [key, value] of Object.entries(config.env)) {
-        lines.push(`${key} = ${tomlBasicString(value)}`);
+        lines.push(`${tomlKey(key)} = ${tomlBasicString(value)}`);
       }
     }
     lines.push('');
@@ -503,6 +504,17 @@ export function buildCodexProcessEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv 
   if (!next.CODEX_HOME) next.CODEX_HOME = next.HOME ? path.join(next.HOME, '.codex') : '/home/node/.codex';
   if (!next.HOME) next.HOME = '/home/node';
   return next;
+}
+
+/**
+ * Server names and env keys are attacker-influenced (add_mcp_server approval
+ * flow validates content, not charset). Quoting anything that isn't a bare
+ * TOML key keeps a crafted name from closing the header and opening its own
+ * [mcp_servers.*] table with a command line the approval card never showed.
+ * Bare and quoted forms name the same table, so safe names stay byte-identical.
+ */
+function tomlKey(name: string): string {
+  return /^[A-Za-z0-9_-]+$/.test(name) ? name : tomlBasicString(name);
 }
 
 export function tomlBasicString(value: string): string {

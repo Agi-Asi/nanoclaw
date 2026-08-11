@@ -35,6 +35,10 @@ describe('Codex config TOML', () => {
     expect(tomlBasicString('a "quoted" \\\\ value')).toBe('"a \\"quoted\\" \\\\\\\\ value"');
   });
 
+  it('escapes control characters TOML forbids raw', () => {
+    expect(tomlBasicString('bell\u0007tab\tdel\u007f')).toBe('"bell\\u0007tab\\u0009del\\u007F"');
+  });
+
   it('rejects newlines', () => {
     expect(() => tomlBasicString('bad\nvalue')).toThrow(/newline/);
   });

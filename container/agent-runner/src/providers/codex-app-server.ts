@@ -507,11 +507,13 @@ export function buildCodexProcessEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv 
 }
 
 /**
- * Server names and env keys are attacker-influenced (add_mcp_server approval
- * flow validates content, not charset). Quoting anything that isn't a bare
- * TOML key keeps a crafted name from closing the header and opening its own
- * [mcp_servers.*] table with a command line the approval card never showed.
- * Bare and quoted forms name the same table, so safe names stay byte-identical.
+ * Defense in depth behind the host-side charset allowlist
+ * (MCP_SERVER_NAME_RE in src/container-config.ts): configs stored before
+ * that validation existed, or hand-edited DB rows, can still carry names
+ * that are not bare TOML keys. [A-Za-z0-9_-]+ is exactly TOML's bare-key
+ * grammar, so safe names stay byte-identical, and anything else is quoted —
+ * a crafted name can never close the header and open its own
+ * [mcp_servers.*] table. Bare and quoted forms name the same table.
  */
 function tomlKey(name: string): string {
   return /^[A-Za-z0-9_-]+$/.test(name) ? name : tomlBasicString(name);
@@ -521,7 +523,14 @@ export function tomlBasicString(value: string): string {
   if (value.includes('\n') || value.includes('\r')) {
     throw new Error(`MCP config value contains newline: ${JSON.stringify(value.slice(0, 40))}`);
   }
-  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  // TOML forbids raw control chars in basic strings — emit \uXXXX escapes so
+  // one stray invisible byte can't make codex reject the whole config file.
+  // The control-char replace must stay last: earlier replaces would double
+  // the backslash it emits into a literal \\uXXXX.
+  return `"${value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/[\x00-\x1f\x7f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`)}"`;
 }
 
 function sendCodexError(server: AppServer, id: number | string, message: string, data?: unknown): void {

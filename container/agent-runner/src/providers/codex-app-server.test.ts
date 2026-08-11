@@ -35,6 +35,10 @@ describe('Codex config TOML', () => {
     expect(tomlBasicString('a "quoted" \\\\ value')).toBe('"a \\"quoted\\" \\\\\\\\ value"');
   });
 
+  it('escapes control characters TOML forbids raw', () => {
+    expect(tomlBasicString('bell\u0007tab\tdel\u007f')).toBe('"bell\\u0007tab\\u0009del\\u007F"');
+  });
+
   it('rejects newlines', () => {
     expect(() => tomlBasicString('bad\nvalue')).toThrow(/newline/);
   });
@@ -49,6 +53,11 @@ describe('Codex config TOML', () => {
           command: 'bun',
           args: ['run', '/app/src/mcp-tools/index.ts'],
           env: { FOO: 'bar' },
+        },
+        docs: {
+          type: 'http',
+          url: 'https://mcp.example.com/mcp',
+          headers: { 'X-Api-Version': '2024-06' },
         },
       },
       MEMORY_SESSION_HOOK,
@@ -70,6 +79,9 @@ describe('Codex config TOML', () => {
     expect(content).toContain('args = ["run", "/app/src/mcp-tools/index.ts"]');
     expect(content).toContain('[mcp_servers.nanoclaw.env]');
     expect(content).toContain('FOO = "bar"');
+    expect(content).toContain(
+      '[mcp_servers.docs]\nurl = "https://mcp.example.com/mcp"\n[mcp_servers.docs.http_headers]\n"X-Api-Version" = "2024-06"',
+    );
 
     const hooks = JSON.parse(fs.readFileSync(path.join(tmpHome, '.codex', 'hooks.json'), 'utf-8'));
     expect(hooks.hooks.SessionStart).toEqual([
@@ -79,6 +91,42 @@ describe('Codex config TOML', () => {
       },
     ]);
     expect(CODEX_APP_SERVER_ARGS).toContain('--dangerously-bypass-hook-trust');
+  });
+
+  it('quotes non-bare server names and env keys so they cannot open new tables', () => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
+    process.env.HOME = tmpHome;
+
+    writeCodexConfigToml(
+      {
+        'docs] [mcp_servers.evil]': {
+          type: 'http',
+          url: 'https://mcp.example.com/mcp',
+          headers: { 'X-V': '1' },
+        },
+        plain: { command: 'bun', env: { 'BAD KEY': 'v' } },
+      },
+      MEMORY_SESSION_HOOK,
+    );
+
+    const content = fs.readFileSync(path.join(tmpHome, '.codex', 'config.toml'), 'utf-8');
+    expect(content).toContain('[mcp_servers."docs] [mcp_servers.evil]"]');
+    expect(content).toContain('[mcp_servers."docs] [mcp_servers.evil]".http_headers]');
+    expect(content).not.toContain('\n[mcp_servers.evil]');
+    expect(content).toContain('[mcp_servers.plain.env]');
+    expect(content).toContain('"BAD KEY" = "v"');
+  });
+
+  it('fails closed on a server name containing a newline', () => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
+    process.env.HOME = tmpHome;
+
+    expect(() =>
+      writeCodexConfigToml(
+        { 'docs]\n[mcp_servers.evil]': { type: 'http', url: 'https://mcp.example.com/mcp' } },
+        MEMORY_SESSION_HOOK,
+      ),
+    ).toThrow(/newline/);
   });
 
   it('preserves unrelated hooks and refreshes only the NanoClaw memory entry', () => {

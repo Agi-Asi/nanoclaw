@@ -45,11 +45,11 @@ git show origin/providers:container/agent-runner/src/providers/opencode.compacti
 git show origin/providers:container/agent-runner/src/providers/opencode.config.test.ts > container/agent-runner/src/providers/opencode.config.test.ts
 git show origin/providers:container/agent-runner/src/providers/opencode.memory.test.ts > container/agent-runner/src/providers/opencode.memory.test.ts
 git show origin/providers:container/agent-runner/src/providers/opencode.question.test.ts > container/agent-runner/src/providers/opencode.question.test.ts
-git show origin/providers:container/agent-runner/src/providers/cwd-shim.ts             > container/agent-runner/src/providers/cwd-shim.ts
-git show origin/providers:container/agent-runner/src/providers/cwd-shim.test.ts        > container/agent-runner/src/providers/cwd-shim.test.ts
+git show origin/providers:container/agent-runner/src/providers/cwd-shim.ts             > container/agent-runner/src/providers/cwd-shim.ts.new && mv container/agent-runner/src/providers/cwd-shim.ts.new container/agent-runner/src/providers/cwd-shim.ts
+git show origin/providers:container/agent-runner/src/providers/cwd-shim.test.ts        > container/agent-runner/src/providers/cwd-shim.test.ts.new && mv container/agent-runner/src/providers/cwd-shim.test.ts.new container/agent-runner/src/providers/cwd-shim.test.ts
 ```
 
-(`cwd-shim.ts` is byte-identical to the trunk copy on current trunks — `mcp-to-opencode.ts` imports it, so copying it keeps the payload self-sufficient on trunks that predate it.)
+(`cwd-shim.ts` is byte-identical to the trunk copy on current trunks — `mcp-to-opencode.ts` imports it, so copying it keeps the payload self-sufficient on trunks that predate it. These two overwrite real trunk files, so they go through a `.new` + `mv` guard: on a providers branch that predates the cwd payload, `git show` fails without truncating the live copy the default provider imports.)
 
 ### 3. Append the self-registration imports
 

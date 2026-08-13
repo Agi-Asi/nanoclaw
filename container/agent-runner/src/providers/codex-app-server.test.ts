@@ -93,6 +93,35 @@ describe('Codex config TOML', () => {
     expect(CODEX_APP_SERVER_ARGS).toContain('--dangerously-bypass-hook-trust');
   });
 
+  it('emits cwd for a stdio server above the env sub-table, and omits it when absent', () => {
+    tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
+    process.env.HOME = tmpHome;
+
+    writeCodexConfigToml(
+      {
+        probe: {
+          command: '/workspace/agent/plugins/sdr/run.js',
+          args: ['--flag'],
+          env: { FOO: 'bar' },
+          cwd: '/workspace/agent/plugin-data/sdr',
+        },
+        plain: { command: 'bun' },
+      },
+      MEMORY_SESSION_HOOK,
+    );
+
+    const content = fs.readFileSync(path.join(tmpHome, '.codex', 'config.toml'), 'utf-8');
+    expect(content).toContain(
+      'command = "/workspace/agent/plugins/sdr/run.js"\n' +
+        'cwd = "/workspace/agent/plugin-data/sdr"\n' +
+        'args = ["--flag"]\n' +
+        '[mcp_servers.probe.env]',
+    );
+    const plainTable = content.split('[mcp_servers.plain]')[1].split('[mcp_servers.')[0];
+    expect(plainTable).toContain('command = "bun"');
+    expect(plainTable).not.toContain('cwd =');
+  });
+
   it('quotes non-bare server names and env keys so they cannot open new tables', () => {
     tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-home-'));
     process.env.HOME = tmpHome;

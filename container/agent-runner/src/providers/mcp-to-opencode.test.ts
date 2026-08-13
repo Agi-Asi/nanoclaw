@@ -53,6 +53,17 @@ describe('mcpServersToOpenCodeConfig', () => {
     });
   });
 
+  it('wraps a cwd-declaring server in the cd-then-exec argv', () => {
+    const mcp = mcpServersToOpenCodeConfig({
+      probe: { command: './run.js', args: ['--flag'], cwd: '/workspace/agent/plugin-data/sdr' },
+    });
+    expect(mcp.probe).toEqual({
+      type: 'local',
+      command: ['/bin/sh', '-c', 'cd "$0" && exec "$@"', '/workspace/agent/plugin-data/sdr', './run.js', '--flag'],
+      enabled: true,
+    });
+  });
+
   it('maps Streamable HTTP servers to remote entries', () => {
     expect(
       mcpServersToOpenCodeConfig({

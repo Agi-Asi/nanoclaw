@@ -228,12 +228,6 @@ export function registerSlackBotGuard(register: BridgeInboundPolicyRegistrar): v
   register('slack', wrapSlackBotGuard);
 }
 
-// The bridge's registration seam (`registerBridgeInboundPolicy`, trunk PR
-// refa-b5-bridge-inbound-policy) has not been forward-merged into this branch
-// yet. Feature-detect it so this module loads (and the wrap stays
-// unit-testable) on a pre-B5 tree; the registration below activates
-// automatically, with no further edit, once the hook merges.
-const registerBridgeInboundPolicy = (
-  chatSdkBridge as unknown as { registerBridgeInboundPolicy?: BridgeInboundPolicyRegistrar }
-).registerBridgeInboundPolicy;
-if (registerBridgeInboundPolicy) registerSlackBotGuard(registerBridgeInboundPolicy);
+// Registers on import through the bridge's inbound-policy seam (on this
+// branch since the main sync).
+registerSlackBotGuard(chatSdkBridge.registerBridgeInboundPolicy);

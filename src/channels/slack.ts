@@ -17,28 +17,6 @@ import { createChatSdkBridge } from './chat-sdk-bridge.js';
 import { registerChannelAdapter } from './channel-registry.js';
 
 /**
- * TYPE-COMPAT SHIM — collapses into plain ChannelDefaults once trunk `main`
- * is synced into this branch. Two trunk PRs extend the declaration surface:
- * pr-series/stan-decline-notify adds 'decline_notify' to the
- * unknownSenderPolicy union, and pr-series/refa-b7-channel-dm-defaults adds
- * the optional sessionMode field to ChannelContextDefaults (the wiring's
- * threads=1 stamp is derived from sessionMode 'per-thread' by
- * resolveWiringDefaults, not declared). This branch's copy of the types
- * predates both, so the aliases below widen them locally — field-for-field
- * the trunk shape, nothing trunk doesn't declare. When the sync lands:
- * delete both aliases and the one assertion at SLACK_DEFAULTS_DECL, and type
- * SLACK_DEFAULTS as ChannelDefaults directly.
- */
-type SlackContextDefaults = Omit<ChannelContextDefaults, 'unknownSenderPolicy'> & {
-  unknownSenderPolicy: ChannelContextDefaults['unknownSenderPolicy'] | 'decline_notify';
-  sessionMode?: 'shared' | 'per-thread';
-};
-type SlackChannelDefaults = Omit<ChannelDefaults, 'dm' | 'group'> & {
-  dm: SlackContextDefaults;
-  group: SlackContextDefaults;
-};
-
-/**
  * Dedicated bot app on a threaded platform. group threads:true keeps
  * mention-sticky bounded — engagement sticks per-thread, not forever.
  * dm.threads:false is a deliberate policy choice, not a capability limit:
@@ -63,7 +41,7 @@ type SlackChannelDefaults = Omit<ChannelDefaults, 'dm' | 'group'> & {
  *   grants stay explicit (`ncl members add`). A deliberate, reviewed default
  *   change for Slack DM rows auto-created after this lands.
  */
-export const SLACK_DEFAULTS: SlackChannelDefaults = {
+export const SLACK_DEFAULTS: ChannelDefaults = {
   dm: {
     engageMode: 'pattern',
     engagePattern: '.',
@@ -71,14 +49,20 @@ export const SLACK_DEFAULTS: SlackChannelDefaults = {
     sessionMode: 'per-thread',
     unknownSenderPolicy: 'decline_notify',
   },
-  group: { engageMode: 'mention-sticky', threads: true, unknownSenderPolicy: 'request_approval' },
+  group: {
+    engageMode: 'mention-sticky',
+    threads: true,
+    // D29: group conversations are per-thread too — Slack channels
+    // materialize a thread per top-level message, and ambient context
+    // (same-mg fan + channel-timeline backfill) is the continuity layer.
+    // Creation-time stamp like dm.sessionMode; existing wirings never flip.
+    // Canvas-comment shadow channels deliberately stay shared (wired
+    // explicitly in room-canvas, the documented D29 exception).
+    sessionMode: 'per-thread',
+    unknownSenderPolicy: 'request_approval',
+  },
   mentions: 'platform',
 };
-
-// One assertion, shared by the bridge config and the registry declaration.
-// Sound because the trunk ChannelDefaults is a strict widening of this
-// branch's (see the type-compat shim above); dies with the shim on sync.
-const SLACK_DEFAULTS_DECL = SLACK_DEFAULTS as ChannelDefaults;
 
 /** Construction knobs for one Slack bot identity. */
 export interface SlackBridgeOptions {
@@ -132,7 +116,7 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
     instance: options.instanceKey, // undefined ⇒ default instance (keyed by channelType)
     concurrency: 'concurrent',
     supportsThreads: true,
-    defaults: SLACK_DEFAULTS_DECL,
+    defaults: SLACK_DEFAULTS,
   });
   bridge.resolveChannelName = async (platformId: string) => {
     try {
@@ -147,5 +131,5 @@ export function createSlackBridge(options: SlackBridgeOptions = {}): ChannelAdap
 
 registerChannelAdapter('slack', {
   factory: () => createSlackBridge(),
-  defaults: SLACK_DEFAULTS_DECL,
+  defaults: SLACK_DEFAULTS,
 });

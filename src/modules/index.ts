@@ -28,3 +28,11 @@ import './self-mod/index.js';
 // registry (src/guard/, 3-arg registerDeliveryAction), on this branch since
 // the main sync underneath this commit.
 import './canvas-actions/index.js';
+
+// slack room membership (adopt-on-invite, detach/re-attach, owner-presence).
+// Active per this branch's fully-loaded convention; /add-slack appends the
+// same import on user installs.
+import './slack-room-membership/index.js';
+
+// slack DM onboarding + thread titles (welcome prompts, auto-title).
+import './slack-onboarding/index.js';

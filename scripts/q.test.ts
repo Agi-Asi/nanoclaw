@@ -43,6 +43,19 @@ describe('scripts/q.ts', () => {
     return { stdout: r.stdout ?? '', stderr: r.stderr ?? '', status: r.status ?? -1 };
   }
 
+  it('preserves DELETE journaling for explicit session-style paths', () => {
+    const before = new Database(dbPath);
+    expect(before.pragma('journal_mode = DELETE', { simple: true })).toBe('delete');
+    before.close();
+
+    const result = run('SELECT COUNT(*) FROM t');
+    expect(result.status, result.stderr).toBe(0);
+
+    const after = new Database(dbPath, { readonly: true });
+    expect(after.pragma('journal_mode', { simple: true })).toBe('delete');
+    after.close();
+  });
+
   it('SELECT prints pipe-separated rows in default order', () => {
     const r = run('SELECT id, name FROM t ORDER BY id');
     expect(r.status).toBe(0);

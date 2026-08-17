@@ -4,7 +4,7 @@ import type { Migration } from './index.js';
  * SQLite treats NULL values as distinct inside a composite primary key, so
  * the original (user_id, role, agent_group_id) key allowed duplicate global
  * owner/admin grants. Collapse any existing duplicates, then enforce the two
- * logical key shapes explicitly. The Postgres baseline preserves these
+ * logical key shapes explicitly. A remote baseline must preserve these
  * indexes instead of relying on nullable-key behavior.
  */
 export const migration023: Migration = {

@@ -4,10 +4,8 @@
  * BotFather hands out tokens with no user binding, so anyone who guesses the
  * bot's username can DM it. Pairing closes that gap: setup creates a one-time
  * 6-digit code and the operator echoes it back from the chat they want to
- * register. The message must be exactly the 6 digits (optionally prefixed by
- * `@botname ` for groups with privacy ON) — arbitrary messages that happen to
- * contain a 6-digit number do NOT match. The inbound interceptor in
- * telegram.ts matches the code, records the chat, upserts the paired user,
+ * register (see extractCode for the exact match rule). The inbound interceptor
+ * in telegram.ts matches the code, records the chat, upserts the paired user,
  * and (if no owner exists yet) promotes them to owner — all before the
  * message ever reaches the router.
  *
@@ -165,13 +163,15 @@ export function extractAddressedText(text: string, botUsername: string): string 
 }
 
 /**
- * Extract a pairing code from an inbound message. The message must be exactly
- * 6 digits (optionally prefixed by `@botname `) — loose matches like
- * "my pin is 123456" are rejected to avoid false positives from chatter.
+ * Extract a pairing code from an inbound message. The message must contain
+ * nothing but the 6 digits (optionally prefixed by `@botname `) — loose
+ * matches like "my pin is 123456" are rejected to avoid false positives from
+ * chatter. Whitespace between the digits is allowed: the setup card displays
+ * the code spaced ("1   2   3   4   5   6"), and operators paste it verbatim.
  */
 export function extractCode(text: string, botUsername: string): string | null {
   const addressed = extractAddressedText(text, botUsername);
-  const candidate = (addressed !== null ? addressed : text).trim();
+  const candidate = (addressed !== null ? addressed : text).replace(/\s+/g, '');
   const m = candidate.match(/^(\d{6})$/);
   return m ? m[1] : null;
 }

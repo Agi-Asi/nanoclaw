@@ -61,6 +61,13 @@ describe('extractCode', () => {
     expect(extractCode('my pin is 034927', 'nanobot')).toBeNull();
     expect(extractCode('034927 thanks', 'nanobot')).toBeNull();
   });
+  it('accepts the code as copied from the setup card (spaced digits)', () => {
+    expect(extractCode('0   3   4   9   2   7', 'nanobot')).toBe('034927');
+    expect(extractCode(' 0 3 4 9 2 7 ', 'nanobot')).toBe('034927');
+  });
+  it('accepts spaced digits after @botname', () => {
+    expect(extractCode('@nanobot 0   3   4   9   2   7', 'nanobot')).toBe('034927');
+  });
 });
 
 describe('createPairing', () => {
@@ -106,6 +113,18 @@ describe('tryConsume', () => {
       isGroup: false,
     });
     expect(out).toBeNull();
+  });
+
+  it('consumes a code pasted as the setup card displays it (spaced)', async () => {
+    const r = await createPairing('main');
+    const out = await tryConsume({
+      text: r.code.split('').join('   '),
+      botUsername: 'nanobot',
+      platformId: 'x',
+      isGroup: false,
+    });
+    expect(out).not.toBeNull();
+    expect(out!.status).toBe('consumed');
   });
 
   it('matches a bare code without @botname addressing', async () => {

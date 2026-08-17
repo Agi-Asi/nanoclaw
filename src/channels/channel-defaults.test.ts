@@ -176,15 +176,39 @@ describe('resolveWiringDefaults', () => {
       mentions: 'dm-only',
     });
 
+    // Name ends in ')' (non-word) — the trailing declared \b could never
+    // match there, so it is dropped; the leading \b stays.
     expect(resolveWiringDefaults('mock', true, 'C-3PO (dev)')).toEqual({
       engage_mode: 'pattern',
-      engage_pattern: '\\bC-3PO \\(dev\\)\\b',
+      engage_pattern: '\\bC-3PO \\(dev\\)',
     });
     // DM context: no token, pattern passes through untouched.
     expect(resolveWiringDefaults('mock', false, 'C-3PO (dev)')).toEqual({
       engage_mode: 'pattern',
       engage_pattern: '.',
     });
+  });
+
+  it('keeps both \\b boundaries for a plain word name and produces a matching regex', async () => {
+    const { resolveWiringDefaults } = await withDeclaration({
+      dm: { engageMode: 'pattern', engagePattern: '.', threads: false, unknownSenderPolicy: 'public' },
+      group: { engageMode: 'pattern', engagePattern: '\\b{name}\\b', threads: false, unknownSenderPolicy: 'strict' },
+      mentions: 'dm-only',
+    });
+
+    const word = resolveWiringDefaults('mock', true, 'Andy');
+    expect(word.engage_pattern).toBe('\\bAndy\\b');
+    expect(new RegExp(word.engage_pattern!).test('@Andy status')).toBe(true);
+    expect(new RegExp(word.engage_pattern!).test('@Andyboy status')).toBe(false);
+
+    // Trailing non-word char: '@Andy (backup) status' must still engage.
+    const punct = resolveWiringDefaults('mock', true, 'Andy (backup)');
+    expect(new RegExp(punct.engage_pattern!).test('@Andy (backup) status')).toBe(true);
+
+    // Leading non-word char: the leading \b is dropped instead.
+    const lead = resolveWiringDefaults('mock', true, '!Nano');
+    expect(lead.engage_pattern).toBe('!Nano\\b');
+    expect(new RegExp(lead.engage_pattern!).test('hey !Nano status')).toBe(true);
   });
 
   it('coerces mention-sticky to mention when the context threads=false', async () => {

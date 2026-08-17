@@ -102,8 +102,6 @@ MATTERMOST_BOT_TOKEN=your-bot-access-token
 
 `MATTERMOST_BASE_URL` must include the scheme and no trailing slash.
 
-Sync to container: `mkdir -p data/env && cp .env data/env/env`
-
 ### Confirm the token works
 
 ```bash

@@ -14,10 +14,26 @@
  * Slack/Discord, and non-threaded group platforms have null threadIds).
  */
 import type { ChannelDefaults } from './adapter.js';
-import { getChannelDefaults } from './channel-registry.js';
+import { getChannelDefaults, hasDeclaredChannelDefaults } from './channel-registry.js';
+import { log } from '../log.js';
+import type { MessagingGroup } from '../types.js';
 
 function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Substitute the (regex-escaped) agent name for `{name}` in a declared
+ * pattern. A `\b` adjacent to a non-word character can never match, so when
+ * the name starts/ends with one (e.g. "Nano!", "Andy (backup)") the adjacent
+ * declared boundary is dropped — mirrors selfChatEngagePattern in
+ * setup/channels/whatsapp.ts.
+ */
+function substituteName(pattern: string, name: string): string {
+  let out = pattern;
+  if (!/^\w/.test(name)) out = out.replaceAll('\\b{name}', '{name}');
+  if (!/\w$/.test(name)) out = out.replaceAll('{name}\\b', '{name}');
+  return out.replaceAll('{name}', escapeRegex(name));
 }
 
 /**
@@ -26,6 +42,9 @@ function escapeRegex(text: string): string {
  * @param channelKey mg.instance ?? mg.channel_type (getChannelAdapter key discipline)
  * @param isGroup event.message.isGroup ?? mg.is_group === 1 — never derived from threadId
  * @param agentGroupName substituted (regex-escaped) for the `{name}` token in declared patterns
+ * @param channelType mg.channel_type — pass when channelKey may be a named
+ *   instance so a dead instance still resolves its platform's declaration
+ *   (getChannelDefaults' second-arg discipline)
  *
  * mention-sticky is downgraded to mention when the context's declared threads
  * value is false: sticky engagement is keyed on per-thread session existence,
@@ -35,8 +54,9 @@ export function resolveWiringDefaults(
   channelKey: string,
   isGroup: boolean,
   agentGroupName: string,
+  channelType?: string,
 ): { engage_mode: 'pattern' | 'mention' | 'mention-sticky'; engage_pattern: string | null } {
-  const decl = getChannelDefaults(channelKey);
+  const decl = getChannelDefaults(channelKey, channelType);
   const ctx = isGroup ? decl.group : decl.dm;
 
   let mode = ctx.engageMode;
@@ -51,16 +71,19 @@ export function resolveWiringDefaults(
   }
   return {
     engage_mode: 'pattern',
-    engage_pattern: ctx.engagePattern.replaceAll('{name}', escapeRegex(agentGroupName)),
+    engage_pattern: substituteName(ctx.engagePattern, agentGroupName),
   };
 }
 
-/** unknown_sender_policy for a messaging_groups row created in this context. */
+/** unknown_sender_policy for a messaging_groups row created in this context.
+ *  `channelType` follows the same dead-named-instance discipline as
+ *  resolveWiringDefaults. */
 export function resolveUnknownSenderPolicy(
   channelKey: string,
   isGroup: boolean,
-): 'strict' | 'request_approval' | 'public' {
-  const decl = getChannelDefaults(channelKey);
+  channelType?: string,
+): 'strict' | 'request_approval' | 'decline_notify' | 'public' {
+  const decl = getChannelDefaults(channelKey, channelType);
   return (isGroup ? decl.group : decl.dm).unknownSenderPolicy;
 }
 
@@ -83,4 +106,55 @@ export function resolveThreadPolicy(
   const inherited = (isGroup ? decl.group : decl.dm).threads;
   const wanted = wiringThreads === null ? inherited : wiringThreads !== 0;
   return wanted && supportsThreads;
+}
+
+export interface EngageValues {
+  engage_mode?: unknown;
+  engage_pattern?: unknown;
+  threads?: unknown;
+}
+
+/**
+ * Cross-column validation against the channel's declaration. Shared by every
+ * wiring-creation surface (`ncl wirings` create/update, the setup wizard's
+ * register step) so a partial update or an explicit flag can't produce a
+ * combination create would reject. May mutate `w.engage_mode`: the
+ * mention-sticky→mention coercion when the effective thread policy is off —
+ * sticky engagement is keyed on per-thread session existence, so without
+ * thread ids it would engage once and never disengage.
+ *
+ * Declaration-derived checks are gated on hasDeclaredChannelDefaults: stale
+ * (undeclared) adapters keep the legacy lenient behavior — the fallback
+ * declaration is permissive on mentions but its threads value is false when
+ * no adapter is live, which would wrongly coerce offline-created wirings.
+ */
+export function validateEngageAgainstChannel(w: EngageValues, mg: MessagingGroup): void {
+  if (
+    w.engage_mode === 'pattern' &&
+    (w.engage_pattern === undefined || w.engage_pattern === null || w.engage_pattern === '')
+  ) {
+    throw new Error(`engage_mode 'pattern' requires --engage-pattern (use "." to match every message)`);
+  }
+  if (w.engage_mode !== 'mention' && w.engage_mode !== 'mention-sticky') return;
+
+  const channelKey = mg.instance ?? mg.channel_type;
+  if (!hasDeclaredChannelDefaults(channelKey, mg.channel_type)) return;
+
+  const decl = getChannelDefaults(channelKey, mg.channel_type);
+  if (decl.mentions === 'never') {
+    throw new Error(
+      `engage_mode '${w.engage_mode}' can never engage on channel '${channelKey}' — its adapter declares mentions: 'never' (no mention signal is emitted; use --engage-mode pattern)`,
+    );
+  }
+  if (w.engage_mode === 'mention-sticky') {
+    const ctx = mg.is_group === 1 ? decl.group : decl.dm;
+    const threads = w.threads === undefined || w.threads === null ? ctx.threads : w.threads !== 0;
+    if (!threads) {
+      log.warn('mention-sticky requires thread ids — coerced to mention', {
+        channel: channelKey,
+        messagingGroupId: mg.id,
+      });
+      w.engage_mode = 'mention';
+    }
+  }
 }

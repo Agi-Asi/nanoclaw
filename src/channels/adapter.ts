@@ -44,6 +44,9 @@ export interface DeliveryAddress {
  */
 export interface InboundEvent {
   channelType: string;
+  /** Receiving adapter instance; stamped host-side (src/index.ts onInbound).
+   *  Absent (e.g. CLI onInboundEvent) means the default instance (= channelType). */
+  instance?: string;
   platformId: string;
   threadId: string | null;
   message: {
@@ -135,8 +138,11 @@ export interface ChannelContextDefaults {
   /**
    * unknown_sender_policy stamped on messaging_groups rows auto-created by
    * the router or created by wizard/CLI paths in this context.
+   * 'decline_notify' (DM-shaped channels): the host politely declines the
+   * unknown sender in-channel and sends the owner a one-line FYI — no
+   * approval card; access grants stay explicit (`ncl members add`).
    */
-  unknownSenderPolicy: 'strict' | 'request_approval' | 'public';
+  unknownSenderPolicy: 'strict' | 'request_approval' | 'decline_notify' | 'public';
 }
 
 /**
@@ -166,8 +172,7 @@ export interface ChannelAdapter {
 
   /**
    * Adapter-instance name — distinguishes N adapters of one platform
-   * (e.g. a native WhatsApp bridge alongside the WhatsApp Cloud bridge, or
-   * three Slack apps in one workspace). Defaults to channelType.
+   * (e.g. three Slack apps in one workspace). Defaults to channelType.
    * channelType stays the SEMANTIC platform key (user ids '<channelType>:<handle>',
    * formatting, container config); instance is a host-side routing key only.
    * Must be unique across active adapters and URL-safe (no '/', '?', ':').
@@ -195,8 +200,31 @@ export interface ChannelAdapter {
   deliver(platformId: string, threadId: string | null, message: OutboundMessage): Promise<string | undefined>;
 
   // Optional
-  setTyping?(platformId: string, threadId: string | null): Promise<void>;
+  setTyping?(
+    platformId: string,
+    threadId: string | null,
+    status?: string,
+    statusKind?: 'auto' | 'agent',
+  ): Promise<void>;
   syncConversations?(): Promise<ConversationInfo[]>;
+  resolveChannelName?(platformId: string): Promise<string | null>;
+
+  /**
+   * Set a human-readable title on a conversation thread. Platforms with a
+   * thread-title concept render this in the conversation list; the router
+   * fires it once when a brand-new per-thread DM session is created, titled
+   * after the first user message.
+   *
+   * Only adapters whose platform has a thread-title concept expose this —
+   * everyone else omits it and callers no-op via optional chaining
+   * (setThreadTitle in channel-registry.ts).
+   */
+  setThreadTitle?(platformId: string, threadId: string, title: string): Promise<void>;
+  setSuggestedPrompts?(
+    platformId: string,
+    prompts: Array<{ title: string; message: string }>,
+    title?: string,
+  ): Promise<void>;
 
   /**
    * Subscribe the bot to a thread so follow-up messages route via the
@@ -225,7 +253,6 @@ export interface ChannelAdapter {
    * Returning the same platform_id on repeated calls is expected.
    */
   openDM?(userHandle: string): Promise<string>;
-  resolveChannelName?: (platformId: string) => Promise<string | null>;
 
   /**
    * Declared wiring-time defaults for this channel. Optional for backward

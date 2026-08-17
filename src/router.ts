@@ -23,7 +23,7 @@ import { gateCommand } from './command-gate.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import { recordDroppedMessage } from './db/dropped-messages.js';
 import {
-  createMessagingGroup,
+  createMessagingGroupIfAbsent,
   getMessagingGroupAgents,
   getMessagingGroupWithAgentCount,
 } from './db/messaging-groups.js';
@@ -273,13 +273,22 @@ export async function routeInbound(event: InboundEvent): Promise<void> {
       denied_at: null,
       created_at: new Date().toISOString(),
     };
-    await createMessagingGroup(mg);
-    log.info('Auto-created messaging group', {
-      id: mgId,
-      channelType: event.channelType,
-      platformId: event.platformId,
-    });
-    agentCount = 0;
+    const created = await createMessagingGroupIfAbsent(mg);
+    const resolved = await getMessagingGroupWithAgentCount(
+      event.channelType,
+      event.platformId,
+      event.instance ?? event.channelType,
+    );
+    if (!resolved) throw new Error('Messaging group disappeared after first-message insert');
+    mg = resolved.mg;
+    agentCount = resolved.agentCount;
+    if (created) {
+      log.info('Auto-created messaging group', {
+        id: mgId,
+        channelType: event.channelType,
+        platformId: event.platformId,
+      });
+    }
   } else {
     mg = found.mg;
     agentCount = found.agentCount;

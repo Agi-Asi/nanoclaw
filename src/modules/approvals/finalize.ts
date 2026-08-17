@@ -11,7 +11,7 @@
  * can import it without an import cycle (finalize → primitive only).
  */
 import { wakeContainer } from '../../container-runner.js';
-import { deletePendingApproval } from '../../db/sessions.js';
+import { deletePendingApproval, transitionPendingApprovalStatus } from '../../db/sessions.js';
 import { log } from '../../log.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { PendingApproval, Session } from '../../types.js';
@@ -31,7 +31,10 @@ export async function finalizeReject(
   session: Session,
   userId: string,
   reason?: string,
-): Promise<void> {
+  expectedStatus: 'pending' | 'awaiting_reason' = approval.status === 'awaiting_reason' ? 'awaiting_reason' : 'pending',
+): Promise<boolean> {
+  if (!(await transitionPendingApprovalStatus(approval.approval_id, expectedStatus, 'rejected'))) return false;
+
   const text = reason
     ? `Your ${approval.action} request was rejected by admin: "${reason}"`
     : `Your ${approval.action} request was rejected by admin.`;
@@ -56,4 +59,5 @@ export async function finalizeReject(
   await deletePendingApproval(approval.approval_id);
   await notifyApprovalResolved({ approval, session, outcome: 'reject', userId });
   await wakeContainer(session);
+  return true;
 }

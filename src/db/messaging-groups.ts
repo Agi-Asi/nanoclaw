@@ -10,11 +10,11 @@ import type { MessagingGroup, MessagingGroupAgent } from '../types.js';
 // refactor plan.
 import {
   createDestination,
-  getDestinationByName,
   getDestinationByTarget,
   normalizeName,
 } from '../modules/agent-to-agent/db/agent-destinations.js';
 import { getDb, hasTable } from './connection.js';
+import { isUniqueViolation } from './errors.js';
 
 // ── Messaging Groups ──
 
@@ -24,6 +24,17 @@ export async function createMessagingGroup(group: MessagingGroup): Promise<void>
        VALUES (@id, @channel_type, @platform_id, @instance, @name, @is_group, @unknown_sender_policy, @created_at)`,
     { ...group, instance: group.instance ?? group.channel_type },
   );
+}
+
+/** Router-only idempotent insert for concurrent first messages. */
+export async function createMessagingGroupIfAbsent(group: MessagingGroup): Promise<boolean> {
+  const result = await getDb().run(
+    `INSERT INTO messaging_groups (id, channel_type, platform_id, instance, name, is_group, unknown_sender_policy, created_at)
+       VALUES (@id, @channel_type, @platform_id, @instance, @name, @is_group, @unknown_sender_policy, @created_at)
+       ON CONFLICT (channel_type, platform_id, instance) DO NOTHING`,
+    { ...group, instance: group.instance ?? group.channel_type },
+  );
+  return result.changes > 0;
 }
 
 export async function getMessagingGroup(id: string): Promise<MessagingGroup | undefined> {
@@ -282,27 +293,35 @@ export async function ensureAgentDestinationForWiring(mga: MessagingGroupAgent):
   // delivery is also skipped (same guard), so channel sends still work.
   if (!(await hasTable(getDb(), 'agent_destinations'))) return;
 
-  const existing = await getDestinationByTarget(mga.agent_group_id, 'channel', mga.messaging_group_id);
-  if (existing) return;
-
   const mg = await getMessagingGroup(mga.messaging_group_id);
   if (!mg) return;
 
   const base = normalizeName(mg.name || `${mg.channel_type}-${mga.messaging_group_id.slice(0, 8)}`);
   let localName = base;
   let suffix = 2;
-  while (await getDestinationByName(mga.agent_group_id, localName)) {
-    localName = `${base}-${suffix}`;
-    suffix++;
+  for (;;) {
+    const existing = await getDestinationByTarget(mga.agent_group_id, 'channel', mga.messaging_group_id);
+    if (existing) return;
+    try {
+      // The nested transaction is a savepoint when the wiring itself is being
+      // created transactionally. Some remote backends mark a transaction
+      // failed after a unique violation, so the retry needs this boundary.
+      await getDb().transaction(async () => {
+        await createDestination({
+          agent_group_id: mga.agent_group_id,
+          local_name: localName,
+          target_type: 'channel',
+          target_id: mga.messaging_group_id,
+          created_at: mga.created_at,
+        });
+      });
+      return;
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+      localName = `${base}-${suffix}`;
+      suffix++;
+    }
   }
-
-  await createDestination({
-    agent_group_id: mga.agent_group_id,
-    local_name: localName,
-    target_type: 'channel',
-    target_id: mga.messaging_group_id,
-    created_at: mga.created_at,
-  });
 }
 
 export async function getMessagingGroupAgents(messagingGroupId: string): Promise<MessagingGroupAgent[]> {

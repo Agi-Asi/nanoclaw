@@ -10,6 +10,7 @@ import type { StateAdapter, QueueEntry } from 'chat';
 
 import { getDb } from './db/connection.js';
 import type { DbDriver } from './db/driver.js';
+import { isUniqueViolation } from './db/errors.js';
 
 interface Lock {
   threadId: string;
@@ -173,22 +174,34 @@ export class SqliteStateAdapter implements StateAdapter {
   async appendToList(key: string, value: unknown, options?: { maxLength?: number; ttlMs?: number }): Promise<void> {
     const expiresAt = options?.ttlMs ? Date.now() + options.ttlMs : null;
     const k = this.k(key);
-    const maxRow = await this.db.get<{ max_idx: number | null }>(
-      'SELECT MAX(idx) AS max_idx FROM chat_sdk_lists WHERE key = ?',
-      k,
-    );
-    const nextIdx = (maxRow?.max_idx ?? -1) + 1;
-    await this.db.run(
-      'INSERT INTO chat_sdk_lists (key, idx, value, expires_at) VALUES (?, ?, ?, ?)',
-      k,
-      nextIdx,
-      JSON.stringify(value),
-      expiresAt,
-    );
-    if (options?.maxLength) {
-      const cutoff = nextIdx - options.maxLength;
-      if (cutoff >= 0) {
-        await this.db.run('DELETE FROM chat_sdk_lists WHERE key = ? AND idx <= ?', k, cutoff);
+    for (;;) {
+      try {
+        await this.db.transaction(async () => {
+          const inserted = await this.db.get<{ idx: number }>(
+            `INSERT INTO chat_sdk_lists (key, idx, value, expires_at)
+             SELECT ?, COALESCE(MAX(idx), -1) + 1, ?, ?
+               FROM chat_sdk_lists
+              WHERE key = ?
+             RETURNING idx`,
+            k,
+            JSON.stringify(value),
+            expiresAt,
+            k,
+          );
+          if (!inserted) throw new Error('Chat SDK list append returned no row');
+          if (options?.maxLength) {
+            const cutoff = inserted.idx - options.maxLength;
+            if (cutoff >= 0) {
+              await this.db.run('DELETE FROM chat_sdk_lists WHERE key = ? AND idx <= ?', k, cutoff);
+            }
+          }
+        });
+        return;
+      } catch (error) {
+        // Concurrent MVCC-backend appends can observe the same MAX(idx). The
+        // primary key picks one winner; retry the loser after its savepoint /
+        // transaction has rolled back so the next statement sees the winner.
+        if (!isUniqueViolation(error)) throw error;
       }
     }
   }
@@ -216,12 +229,15 @@ export class SqliteStateAdapter implements StateAdapter {
 
   async dequeue(threadId: string): Promise<QueueEntry | null> {
     const key = this.k(`queue:${threadId}`);
-    const row = await this.db.get<{ idx: number; value: string }>(
-      'SELECT idx, value FROM chat_sdk_lists WHERE key = ? ORDER BY idx ASC LIMIT 1',
+    const row = await this.db.get<{ value: string }>(
+      `DELETE FROM chat_sdk_lists
+             WHERE key = ?
+               AND idx = (SELECT MIN(idx) FROM chat_sdk_lists WHERE key = ?)
+         RETURNING value`,
+      key,
       key,
     );
     if (!row) return null;
-    await this.db.run('DELETE FROM chat_sdk_lists WHERE key = ? AND idx = ?', key, row.idx);
     return JSON.parse(row.value) as QueueEntry;
   }
 

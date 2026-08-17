@@ -166,4 +166,23 @@ describe('queue under a namespace', () => {
     expect(await state.queueDepth('slack:T1')).toBe(0);
     expect(await state.dequeue('slack:T1')).toBeNull();
   });
+
+  it('keeps concurrent appends contiguous and never dequeues one row twice', async () => {
+    const state = await makeAdapter('slack-race');
+    await Promise.all(Array.from({ length: 20 }, (_, i) => state.appendToList('history', i)));
+
+    const rows = await getDb().all<{ idx: number }>(
+      'SELECT idx FROM chat_sdk_lists WHERE key = ? ORDER BY idx',
+      'slack-race:history',
+    );
+    expect(rows.map((row) => row.idx)).toEqual(Array.from({ length: 20 }, (_, i) => i));
+
+    const first = { message: { id: 'q1' } } as never;
+    const second = { message: { id: 'q2' } } as never;
+    await state.enqueue('slack:T2', first, 10);
+    await state.enqueue('slack:T2', second, 10);
+    const dequeued = await Promise.all([state.dequeue('slack:T2'), state.dequeue('slack:T2')]);
+    expect(dequeued).toEqual(expect.arrayContaining([first, second]));
+    expect(await state.dequeue('slack:T2')).toBeNull();
+  });
 });

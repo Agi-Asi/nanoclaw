@@ -39,7 +39,7 @@ export {
   deletePendingQuestion,
   createPendingApproval,
   getPendingApproval,
-  updatePendingApprovalStatus,
+  transitionPendingApprovalStatus,
   deletePendingApproval,
   getPendingApprovalsByAction,
 } from './sessions.js';

@@ -212,6 +212,11 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
   const provider = process.env.OPENCODE_PROVIDER || 'anthropic';
   const model = process.env.OPENCODE_MODEL;
   const smallModel = process.env.OPENCODE_SMALL_MODEL;
+  // Reasoning effort from the group's container config (ncl groups config
+  // update --effort). OpenCode forwards a free-form per-model `options` object
+  // to the ai-sdk provider, which maps reasoningEffort onto reasoning_effort in
+  // the request body.
+  const effort = options.effort;
   const proxyUrl = process.env.ANTHROPIC_BASE_URL;
 
   const providerModelId = model ? model.replace(new RegExp(`^${provider}/`), '') : undefined;
@@ -298,6 +303,7 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
                           id: mid,
                           name: mid,
                           tool_call: true,
+                          ...(isMainModel && effort ? { options: { reasoningEffort: effort } } : {}),
                           ...(isMainModel && modelLimit ? { limit: modelLimit } : {}),
                           ...(isMainModel && modelModalities ? { attachment: true, modalities: modelModalities } : {}),
                         },

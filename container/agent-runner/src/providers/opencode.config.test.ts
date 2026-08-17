@@ -274,3 +274,37 @@ describe('buildOpenCodeConfig permission', () => {
     }
   });
 });
+
+describe('buildOpenCodeConfig reasoning effort', () => {
+  function effortEnv() {
+    process.env.OPENCODE_PROVIDER = 'opencode-go';
+    process.env.OPENCODE_MODEL = 'opencode-go/deepseek-v4-flash';
+    process.env.ANTHROPIC_BASE_URL = 'https://opencode.ai/zen/go/v1';
+    delete process.env.OPENCODE_SMALL_MODEL;
+  }
+
+  function modelOptions(config: Record<string, unknown>, modelId: string) {
+    const entry = (config.provider as Record<string, Record<string, unknown>>)['opencode-go'];
+    return (entry.models as Record<string, Record<string, unknown>>)[modelId].options;
+  }
+
+  it('emits reasoningEffort on the main model when the group config sets an effort', () => {
+    effortEnv();
+    const config = buildOpenCodeConfig({ effort: 'max' });
+    expect(modelOptions(config, 'deepseek-v4-flash')).toEqual({ reasoningEffort: 'max' });
+  });
+
+  it('omits model options when no effort is set', () => {
+    effortEnv();
+    const config = buildOpenCodeConfig({});
+    expect(modelOptions(config, 'deepseek-v4-flash')).toBeUndefined();
+  });
+
+  it('leaves a distinct small model untouched', () => {
+    effortEnv();
+    process.env.OPENCODE_SMALL_MODEL = 'opencode-go/deepseek-v4-flash-lite';
+    const config = buildOpenCodeConfig({ effort: 'high' });
+    expect(modelOptions(config, 'deepseek-v4-flash')).toEqual({ reasoningEffort: 'high' });
+    expect(modelOptions(config, 'deepseek-v4-flash-lite')).toBeUndefined();
+  });
+});

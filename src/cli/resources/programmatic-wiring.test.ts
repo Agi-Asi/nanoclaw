@@ -53,7 +53,16 @@ vi.mock('../../modules/agent-to-agent/write-destinations.js', () => ({ writeDest
 
 const TEST_DIR = '/tmp/nanoclaw-test-cli-programmatic-wiring';
 
-import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../../db/index.js';
+import {
+  initTestDb,
+  closeDb,
+  runMigrations,
+  createAgentGroup,
+  createMessagingGroup,
+  createMessagingGroupAgent,
+  getDb,
+} from '../../db/index.js';
+import { getDestinations } from '../../modules/agent-to-agent/db/agent-destinations.js';
 import { dispatch } from '../dispatch.js';
 // Side-effect imports: register the verbs under test.
 import './messaging-groups.js';
@@ -109,6 +118,23 @@ describe('programmatic wiring verbs', () => {
     expect(count(`SELECT COUNT(*) c FROM messaging_groups WHERE platform_id = ?`, 'resend:you@example.com')).toBe(1);
   });
 
+  it('returns the winner when natural-key creates race', async () => {
+    const args = {
+      channel_type: 'resend',
+      platform_id: 'resend:race@example.com',
+      is_group: 0,
+    };
+    const [first, second] = await Promise.all([
+      send('messaging-groups-create', args),
+      send('messaging-groups-create', args),
+    ]);
+
+    expect(first.ok).toBe(true);
+    expect(second.ok).toBe(true);
+    expect((first as { data: { id: string } }).data.id).toBe((second as { data: { id: string } }).data.id);
+    expect(count(`SELECT COUNT(*) c FROM messaging_groups WHERE platform_id = ?`, args.platform_id)).toBe(1);
+  });
+
   it('users create is idempotent on the user id', async () => {
     const args = { id: 'resend:you@example.com', kind: 'resend', display_name: 'Owner' };
     expect((await send('users-create', args)).ok).toBe(true);
@@ -142,6 +168,43 @@ describe('programmatic wiring verbs', () => {
     expect(w2.ok).toBe(true);
     expect((w2 as { data: { id: string } }).data.id).toBe((wiring as { id: string }).id); // idempotent on the pair
     expect(count(`SELECT COUNT(*) c FROM messaging_group_agents WHERE agent_group_id = ?`, 'ag-1')).toBe(1);
+  });
+
+  it('retries destination-name conflicts from concurrent wiring creates', async () => {
+    for (const [id, platformId] of [
+      ['mg-race-1', 'resend:first@example.com'],
+      ['mg-race-2', 'resend:second@example.com'],
+    ]) {
+      await createMessagingGroup({
+        id,
+        channel_type: 'resend',
+        platform_id: platformId,
+        name: 'Shared Name',
+        is_group: 0,
+        unknown_sender_policy: 'public',
+        created_at: now(),
+      });
+    }
+    const wiring = (id: string, messagingGroupId: string) => ({
+      id,
+      messaging_group_id: messagingGroupId,
+      agent_group_id: 'ag-1',
+      engage_mode: 'pattern' as const,
+      engage_pattern: '.',
+      sender_scope: 'all' as const,
+      ignored_message_policy: 'drop' as const,
+      session_mode: 'shared' as const,
+      priority: 0,
+      created_at: now(),
+    });
+
+    await Promise.all([
+      createMessagingGroupAgent(wiring('mga-race-1', 'mg-race-1')),
+      createMessagingGroupAgent(wiring('mga-race-2', 'mg-race-2')),
+    ]);
+
+    const destinations = await getDestinations('ag-1');
+    expect(destinations.map((row) => row.local_name).sort()).toEqual(['shared-name', 'shared-name-2']);
   });
 
   it('wirings create fails clearly when the messaging group has not been created yet', async () => {

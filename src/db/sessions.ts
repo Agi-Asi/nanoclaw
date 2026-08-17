@@ -231,11 +231,19 @@ export async function getPendingApproval(approvalId: string): Promise<PendingApp
   return getDb().get<PendingApproval>('SELECT * FROM pending_approvals WHERE approval_id = ?', approvalId);
 }
 
-export async function updatePendingApprovalStatus(
+/** Atomically claim one approval state transition. */
+export async function transitionPendingApprovalStatus(
   approvalId: string,
+  expected: PendingApproval['status'],
   status: PendingApproval['status'],
-): Promise<void> {
-  await getDb().run('UPDATE pending_approvals SET status = ? WHERE approval_id = ?', status, approvalId);
+): Promise<boolean> {
+  const result = await getDb().run(
+    'UPDATE pending_approvals SET status = ? WHERE approval_id = ? AND status = ?',
+    status,
+    approvalId,
+    expected,
+  );
+  return result.changes > 0;
 }
 
 /**
@@ -245,12 +253,13 @@ export async function updatePendingApprovalStatus(
  * ghosted hold never strands the requesting agent). Reuses the otherwise-unused
  * `expires_at` column on module-initiated rows.
  */
-export async function markApprovalAwaitingReason(approvalId: string, expiresAt: string): Promise<void> {
-  await getDb().run(
-    "UPDATE pending_approvals SET status = 'awaiting_reason', expires_at = ? WHERE approval_id = ?",
+export async function markApprovalAwaitingReason(approvalId: string, expiresAt: string): Promise<boolean> {
+  const result = await getDb().run(
+    "UPDATE pending_approvals SET status = 'awaiting_reason', expires_at = ? WHERE approval_id = ? AND status = 'pending'",
     expiresAt,
     approvalId,
   );
+  return result.changes > 0;
 }
 
 /** Awaiting-reason approvals whose reply window has elapsed — the sweep's ghost set. */

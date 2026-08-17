@@ -263,6 +263,23 @@ describe('session manager', () => {
     expect(s2.id).toBe(s1.id);
   });
 
+  it('deduplicates concurrent resolution of the same session', async () => {
+    const [first, second] = await Promise.all([
+      resolveSession('ag-1', 'mg-1', null, 'shared'),
+      resolveSession('ag-1', 'mg-1', null, 'shared'),
+    ]);
+
+    expect(first.session.id).toBe(second.session.id);
+    expect([first.created, second.created].sort()).toEqual([false, true]);
+    expect(
+      await getDb().all(
+        "SELECT id FROM sessions WHERE agent_group_id = ? AND messaging_group_id = ? AND status = 'active'",
+        'ag-1',
+        'mg-1',
+      ),
+    ).toHaveLength(1);
+  });
+
   it('should create separate sessions per thread (per-thread mode)', async () => {
     const { session: s1 } = await resolveSession('ag-1', 'mg-1', 'thread-1', 'per-thread');
     const { session: s2 } = await resolveSession('ag-1', 'mg-1', 'thread-2', 'per-thread');
@@ -463,6 +480,33 @@ describe('router', () => {
       },
     });
     expect(await getMessagingGroupByPlatform('slack', 'C-MENTIONED')).toBeDefined();
+  });
+
+  it('deduplicates two concurrent first messages for an unknown channel', async () => {
+    const { routeInbound } = await import('./router.js');
+    const event = (id: string): InboundEvent => ({
+      channelType: 'slack',
+      platformId: 'C-CONCURRENT',
+      threadId: null,
+      message: {
+        id,
+        kind: 'chat',
+        content: JSON.stringify({ sender: 'User', text: '@bot hi' }),
+        timestamp: now(),
+        isMention: true,
+      },
+    });
+
+    await Promise.all([routeInbound(event('msg-concurrent-1')), routeInbound(event('msg-concurrent-2'))]);
+
+    expect(
+      await getDb().all(
+        'SELECT id FROM messaging_groups WHERE channel_type = ? AND platform_id = ? AND instance = ?',
+        'slack',
+        'C-CONCURRENT',
+        'slack',
+      ),
+    ).toHaveLength(1);
   });
 
   it('should route multiple messages to the same session', async () => {
@@ -1242,6 +1286,42 @@ describe('agent-shared session resolution', () => {
 
     const { session } = await resolveSession('ag-1', null, null, 'agent-shared');
     expect(session.messaging_group_id).toBeNull();
+  });
+
+  it('serializes concurrent resolution across different messaging groups', async () => {
+    await createAgentGroup({
+      id: 'ag-1',
+      name: 'Agent',
+      folder: 'agent',
+      agent_provider: null,
+      created_at: now(),
+    });
+    await createMessagingGroup({
+      id: 'mg-1',
+      channel_type: 'discord',
+      platform_id: 'channel-1',
+      name: 'Channel 1',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+    await createMessagingGroup({
+      id: 'mg-2',
+      channel_type: 'discord',
+      platform_id: 'channel-2',
+      name: 'Channel 2',
+      is_group: 1,
+      unknown_sender_policy: 'public',
+      created_at: now(),
+    });
+
+    const [first, second] = await Promise.all([
+      resolveSession('ag-1', 'mg-1', null, 'agent-shared'),
+      resolveSession('ag-1', 'mg-2', null, 'agent-shared'),
+    ]);
+
+    expect(first.session.id).toBe(second.session.id);
+    expect([first.created, second.created].filter(Boolean)).toHaveLength(1);
   });
 });
 

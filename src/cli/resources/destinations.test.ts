@@ -66,12 +66,15 @@ describe('destinations CLI custom ops project to inbound.db (#2465)', () => {
     // Two active sessions for the source agent — both must receive the
     // projected destination row. Fixing only the "newest" session is a
     // common regression shape, so the second session catches that.
-    for (const sid of [SESSION_A, SESSION_B]) {
+    for (const [sid, threadId] of [
+      [SESSION_A, 'test:destinations-a'],
+      [SESSION_B, 'test:destinations-b'],
+    ] as const) {
       await createSession({
         id: sid,
         agent_group_id: SOURCE,
         messaging_group_id: null,
-        thread_id: null,
+        thread_id: threadId,
         agent_provider: null,
         status: 'active',
         container_status: 'stopped',

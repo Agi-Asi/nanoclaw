@@ -27,7 +27,7 @@ import {
   createPendingApproval,
   deletePendingApproval,
   getPendingApprovalsByAction,
-  updatePendingApprovalStatus,
+  transitionPendingApprovalStatus,
 } from '../../db/sessions.js';
 import type { ChannelDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
@@ -70,11 +70,16 @@ function shortApprovalId(): string {
 export async function resolveOneCLIApproval(approvalId: string, selectedOption: string): Promise<boolean> {
   const state = pending.get(approvalId);
   if (!state) return false;
-  pending.delete(approvalId);
-  clearTimeout(state.timer);
 
   const decision: Decision = selectedOption === 'approve' ? 'approve' : 'deny';
-  await updatePendingApprovalStatus(approvalId, decision === 'approve' ? 'approved' : 'rejected');
+  const claimed = await transitionPendingApprovalStatus(
+    approvalId,
+    'pending',
+    decision === 'approve' ? 'approved' : 'rejected',
+  );
+  if (!claimed) return false;
+  pending.delete(approvalId);
+  clearTimeout(state.timer);
   // Card is auto-edited to "✅ <option>" by chat-sdk-bridge's onAction handler,
   // so we don't need to deliver an edit here.
   await deletePendingApproval(approvalId);
@@ -222,7 +227,7 @@ async function expireApproval(approvalId: string, reason: ExpiryReason): Promise
   const row = rows[0];
   if (!row) return;
 
-  await updatePendingApprovalStatus(approvalId, 'expired');
+  if (!(await transitionPendingApprovalStatus(approvalId, 'pending', 'expired'))) return;
   await editCardExpired(row, reason);
   await deletePendingApproval(approvalId);
   log.info('OneCLI approval expired', { approvalId, reason });

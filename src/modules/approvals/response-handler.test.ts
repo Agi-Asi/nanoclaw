@@ -127,6 +127,53 @@ describe('approval response authorization', () => {
     expect(await getPendingApproval('appr-2')).toBeUndefined();
   });
 
+  it('lets only one concurrent approval response run the action handler', async () => {
+    await upsertUser({ id: 'telegram:owner-race', kind: 'telegram', display_name: 'Owner', created_at: now() });
+    await grantRole({
+      user_id: 'telegram:owner-race',
+      role: 'owner',
+      agent_group_id: null,
+      granted_by: null,
+      granted_at: now(),
+    });
+
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const { registerApprovalHandler } = await import('./primitive.js');
+    const { handleApprovalsResponse } = await import('./response-handler.js');
+    const handler = vi.fn(async () => held);
+    registerApprovalHandler('approval_race_action', handler);
+    await createPendingApproval({
+      approval_id: 'appr-race',
+      session_id: 'sess-1',
+      request_id: 'appr-race',
+      action: 'approval_race_action',
+      payload: JSON.stringify({}),
+      created_at: now(),
+      title: 'Race approval',
+      options_json: JSON.stringify([]),
+    });
+    const response = {
+      questionId: 'appr-race',
+      value: 'approve',
+      userId: 'owner-race',
+      channelType: 'telegram',
+      platformId: 'dm-owner-race',
+      threadId: null,
+    };
+
+    const first = handleApprovalsResponse(response);
+    const second = handleApprovalsResponse(response);
+    await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1));
+    release();
+    await Promise.all([first, second]);
+
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(await getPendingApproval('appr-race')).toBeUndefined();
+  });
+
   it('allows global admins to resolve approvals without a session-scoped agent group', async () => {
     await upsertUser({
       id: 'telegram:global-admin',

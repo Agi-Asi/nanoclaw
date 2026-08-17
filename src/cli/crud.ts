@@ -9,6 +9,7 @@
 import { randomUUID } from 'crypto';
 
 import { getDb } from '../db/connection.js';
+import { isUniqueViolation } from '../db/errors.js';
 import { renderVerbHelp } from './help-render.js';
 import { register } from './registry.js';
 import type { Access } from './registry.js';
@@ -270,13 +271,14 @@ function genericCreate(def: ResourceDef) {
     // Runs after pass 3 so defaultFrom-filled columns (e.g. messaging-groups'
     // `instance`) participate in the match. No new row means postCreate /
     // postCommit are correctly skipped — no new companion rows to create.
-    if (def.naturalKey && def.naturalKey.length > 0) {
-      const where = def.naturalKey.map((c) => `${c} = ?`).join(' AND ');
+    const findNaturalKeyRow = async (): Promise<unknown | undefined> => {
+      if (!def.naturalKey || def.naturalKey.length === 0) return undefined;
+      const where = def.naturalKey.map((c) => `${c} IS NOT DISTINCT FROM ?`).join(' AND ');
       const params = def.naturalKey.map((c) => values[c]);
-      const existing = await getDb().get(
-        `SELECT ${visibleColumns(def).join(', ')} FROM ${def.table} WHERE ${where}`,
-        ...params,
-      );
+      return getDb().get(`SELECT ${visibleColumns(def).join(', ')} FROM ${def.table} WHERE ${where}`, ...params);
+    };
+    if (def.naturalKey && def.naturalKey.length > 0) {
+      const existing = await findNaturalKeyRow();
       if (existing) return existing;
     }
 
@@ -288,10 +290,17 @@ function genericCreate(def: ResourceDef) {
     // central DB — filesystem, mailbox projection, adapters, containers, or
     // network — belongs in `postCommit`, which runs after commit below.
     const db = getDb();
-    await db.transaction(async () => {
-      await db.run(`INSERT INTO ${def.table} (${colNames.join(', ')}) VALUES (${placeholders.join(', ')})`, values);
-      if (def.postCreate) await def.postCreate(values);
-    });
+    try {
+      await db.transaction(async () => {
+        await db.run(`INSERT INTO ${def.table} (${colNames.join(', ')}) VALUES (${placeholders.join(', ')})`, values);
+        if (def.postCreate) await def.postCreate(values);
+      });
+    } catch (error) {
+      if (!isUniqueViolation(error) || !def.naturalKey?.length) throw error;
+      const raced = await findNaturalKeyRow();
+      if (!raced) throw error;
+      return raced;
+    }
     if (def.postCommit) await def.postCommit(values);
     return values;
   };

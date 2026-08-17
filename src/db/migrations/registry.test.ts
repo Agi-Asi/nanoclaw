@@ -100,3 +100,94 @@ describe('module migration registry', () => {
     ).toBeUndefined();
   });
 });
+
+describe('migration runner modes and hooks', () => {
+  it('validate mode performs no bootstrap DDL on an empty database', async () => {
+    const registry = await freshRegistry();
+    const db = await freshTestDb();
+
+    await expect(registry.runMigrations(db, [], { mode: 'validate' })).rejects.toThrow('pnpm run migrate');
+    expect(await db.hasTable('schema_version')).toBe(false);
+  });
+
+  it('validate mode reports pending names and accepts a current ledger', async () => {
+    const registry = await freshRegistry();
+    const db = await freshTestDb();
+    const first = testMigration('test-mode-first');
+    const second = testMigration('test-mode-second');
+
+    await registry.runMigrations(db, [first], { mode: 'migrate' });
+    await expect(registry.runMigrations(db, [first, second], { mode: 'validate' })).rejects.toThrow('test-mode-second');
+    await expect(registry.runMigrations(db, [first], { mode: 'validate' })).resolves.toBeUndefined();
+  });
+
+  it('runs bootstrap, overrides, and the migration lock hook', async () => {
+    const registry = await freshRegistry();
+    const db = await freshTestDb();
+    const calls: string[] = [];
+    Object.defineProperty(db, 'migrationHooks', {
+      value: {
+        bootstrapSchema: async () => {
+          calls.push('bootstrap');
+        },
+        migrationOverrides: new Map([
+          [
+            'sqlite-original',
+            {
+              name: 'sqlite-original',
+              async up(driver: typeof db) {
+                calls.push('override');
+                await driver.exec('CREATE TABLE override_won (id TEXT PRIMARY KEY)');
+              },
+            },
+          ],
+        ]),
+        withMigrationLock: async (run: () => Promise<void>) => {
+          calls.push('lock-enter');
+          await run();
+          calls.push('lock-exit');
+        },
+      },
+    });
+    const original: Migration = {
+      version: 999,
+      name: 'sqlite-original',
+      sqliteOnly: true,
+      up() {
+        throw new Error('original migration must not run');
+      },
+    };
+
+    await registry.runMigrations(db, [original], { mode: 'migrate' });
+
+    expect(calls).toEqual(['lock-enter', 'bootstrap', 'override', 'lock-exit']);
+    expect(await db.hasTable('override_won')).toBe(true);
+  });
+
+  it('defaults non-SQLite auto mode to validation without DDL', async () => {
+    const registry = await freshRegistry();
+    const db = await freshTestDb();
+    Object.defineProperty(db, 'dialect', { value: 'remote' });
+
+    await expect(registry.runMigrations(db, [], { mode: 'auto' })).rejects.toThrow('pnpm run migrate');
+    expect(await db.hasTable('schema_version')).toBe(false);
+  });
+
+  it('refuses SQLite-only migrations on another dialect before running them', async () => {
+    const registry = await freshRegistry();
+    const db = await freshTestDb();
+    Object.defineProperty(db, 'dialect', { value: 'remote' });
+    const sqliteOnly: Migration = {
+      version: 999,
+      name: 'sqlite-refused',
+      sqliteOnly: true,
+      up() {
+        throw new Error('must not run');
+      },
+    };
+
+    await expect(registry.runMigrations(db, [sqliteOnly], { mode: 'migrate' })).rejects.toThrow(
+      'port it or provide a backend migration override',
+    );
+  });
+});

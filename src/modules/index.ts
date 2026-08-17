@@ -23,8 +23,8 @@ import './agent-to-agent/index.js';
 import './self-mod/index.js';
 
 // slack canvas actions (canvas_edit / canvas_read delivery actions).
-// Installed on user installs by /add-slack (skill-appended import). Commented
-// here — like `// import './slack.js'` in src/channels/index.ts — until the
-// trunk guard registry (src/guard/, 3-arg registerDeliveryAction) lands in
-// this branch's next main sync; the module registers through it.
-// import './canvas-actions/index.js';
+// Active here per this branch's fully-loaded convention; /add-slack appends
+// the same import on user installs. Registers through the trunk guard
+// registry (src/guard/, 3-arg registerDeliveryAction), on this branch since
+// the main sync underneath this commit.
+import './canvas-actions/index.js';

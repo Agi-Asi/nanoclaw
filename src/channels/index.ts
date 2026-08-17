@@ -45,6 +45,9 @@ import './whatsapp-cloud.js';
 // imessage
 import './imessage.js';
 
+// mattermost
+import './mattermost.js';
+
 // gmail (native, no Chat SDK)
 
 // whatsapp (native, no Chat SDK)

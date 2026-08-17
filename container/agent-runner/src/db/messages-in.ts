@@ -64,6 +64,13 @@ function getMaxMessagesPerPrompt(): number {
  * itself out of the batch. The combined batch is returned in chronological
  * order (oldest first). Host's countDueMessages gates waking on trigger=1
  * separately (see src/db/session-db.ts).
+ *
+ * ORDER MATTERS: the processing_ack filter runs BEFORE the cap windowing.
+ * Rows this container already claimed stay status='pending' in inbound.db
+ * until the host sweep syncs the ack back (up to ~60s) — windowing first
+ * would let a cap-sized batch of those claimed rows fill the window, the
+ * ack filter would then empty it, and genuinely new rows beyond the window
+ * would be invisible for the rest of the turn.
  */
 export function getPendingMessages(isFirstPoll = false): MessageInRow[] {
   const inbound = openInboundDb();
@@ -71,51 +78,35 @@ export function getPendingMessages(isFirstPoll = false): MessageInRow[] {
 
   try {
     const cap = getMaxMessagesPerPrompt();
-    const firstPollArg = isFirstPoll ? 1 : 0;
-    const onWakeFilter = hasOnWakeColumn(inbound) ? 'AND (on_wake = 0 OR ?1 = 1)' : '';
-    const dueFilter = `WHERE status = 'pending'
-           AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
-           ${onWakeFilter}`;
+    const hasOnWake = hasOnWakeColumn(inbound);
+    const stmt = inbound.prepare(
+      `SELECT * FROM messages_in
+       WHERE status = 'pending'
+         AND (process_after IS NULL OR datetime(process_after) <= datetime('now'))
+         ${hasOnWake ? 'AND (on_wake = 0 OR ?1 = 1)' : ''}
+       ORDER BY seq ASC`,
+    );
+    const due = (hasOnWake ? stmt.all(isFirstPoll ? 1 : 0) : stmt.all()) as MessageInRow[];
+    if (due.length === 0) return [];
 
-    // Phase 1: due wake-eligible rows, oldest-first — these always make the batch.
-    const wakeRows = inbound
-      .prepare(
-        `SELECT * FROM messages_in
-         ${dueFilter}
-           AND "trigger" = 1
-         ORDER BY seq ASC
-         LIMIT ?2`,
-      )
-      .all(firstPollArg, cap) as MessageInRow[];
-
-    // Phase 2: fill remaining slots with the most recent context-only rows.
-    const remaining = cap - wakeRows.length;
-    const contextRows =
-      remaining > 0
-        ? (inbound
-            .prepare(
-              `SELECT * FROM messages_in
-               ${dueFilter}
-                 AND "trigger" = 0
-               ORDER BY seq DESC
-               LIMIT ?2`,
-            )
-            .all(firstPollArg, remaining) as MessageInRow[])
-        : [];
-
-    // Merge oldest-first. JS sort is stable, so ties (null seq in tests)
-    // keep wake rows ahead of context rows.
-    const pending = [...wakeRows, ...contextRows].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
-    if (pending.length === 0) return [];
-
-    // Filter out messages already acknowledged in outbound.db
+    // Drop rows already acknowledged in outbound.db (claimed by this or a
+    // previous container run) BEFORE windowing — see the doc comment above.
     const ackedIds = new Set(
       (outbound.prepare('SELECT message_id FROM processing_ack').all() as Array<{ message_id: string }>).map(
         (r) => r.message_id,
       ),
     );
+    const unclaimed = due.filter((m) => !ackedIds.has(m.id));
 
-    return pending.filter((m) => !ackedIds.has(m.id));
+    // Phase 1: wake-eligible rows, oldest-first — these always make the batch.
+    const wakeRows = unclaimed.filter((m) => m.trigger === 1).slice(0, cap);
+    // Phase 2: fill remaining slots with the NEWEST context-only rows.
+    const remaining = cap - wakeRows.length;
+    const contextRows = remaining > 0 ? unclaimed.filter((m) => m.trigger === 0).slice(-remaining) : [];
+
+    // Merge oldest-first. JS sort is stable, so ties (null seq in tests)
+    // keep wake rows ahead of context rows.
+    return [...wakeRows, ...contextRows].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
   } finally {
     inbound.close();
   }

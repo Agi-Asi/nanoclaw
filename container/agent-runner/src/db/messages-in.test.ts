@@ -103,6 +103,50 @@ describe('trigger=1 rows never crowded out', () => {
   });
 });
 
+describe('claimed-but-unsynced rows never hide new work', () => {
+  // Claimed rows stay status='pending' in inbound.db until the host sweep
+  // syncs processing_ack back (~60s). The ack filter must run BEFORE the cap
+  // windowing: windowing first lets a cap-sized claimed batch fill the
+  // window, the filter empties it, and newer rows are invisible all turn.
+  it('a new message arriving after a full claimed batch is returned immediately', () => {
+    const claimed: string[] = [];
+    for (let i = 1; i <= CAP; i++) {
+      insertMessage(`claimed-${i}`, i * 2, 'chat', { sender: 'A', text: `msg ${i}` });
+      claimed.push(`claimed-${i}`);
+    }
+    markProcessing(claimed);
+
+    insertMessage('fresh', (CAP + 1) * 2, 'chat', { sender: 'A', text: 'follow-up' });
+
+    expect(getPendingMessages().map((m) => m.id)).toEqual(['fresh']);
+  });
+
+  it('an older unclaimed task row survives a cap of newer claimed rows', () => {
+    insertMessage('task-old', 2, 'task', { prompt: 'due work' });
+    const claimed: string[] = [];
+    for (let i = 1; i <= CAP; i++) {
+      insertMessage(`claimed-${i}`, 100 + i * 2, 'chat', { sender: 'A', text: `msg ${i}` });
+      claimed.push(`claimed-${i}`);
+    }
+    markProcessing(claimed);
+
+    expect(getPendingMessages().map((m) => m.id)).toEqual(['task-old']);
+  });
+
+  it('claimed context rows do not consume phase-2 slots', () => {
+    const claimed: string[] = [];
+    for (let i = 1; i <= CAP; i++) {
+      insertContextRow(`claimed-ctx-${i}`, i * 2, `old ambient ${i}`);
+      claimed.push(`claimed-ctx-${i}`);
+    }
+    markProcessing(claimed);
+    insertMessage('chat-new', 100, 'chat', { sender: 'A', text: 'real' });
+    insertContextRow('ctx-new', 102, 'fresh ambient');
+
+    expect(getPendingMessages().map((m) => m.id)).toEqual(['chat-new', 'ctx-new']);
+  });
+});
+
 describe('existing selection semantics preserved', () => {
   it('skips rows whose process_after is in the future, both phases', () => {
     const future = new Date(Date.now() + 60_000).toISOString();

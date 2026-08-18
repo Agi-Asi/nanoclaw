@@ -104,10 +104,6 @@ CREATE TABLE user_roles (
   PRIMARY KEY (user_id, role, agent_group_id)
 );
 CREATE INDEX idx_user_roles_scope ON user_roles(agent_group_id, role);
-CREATE UNIQUE INDEX idx_user_roles_global_unique
-  ON user_roles(user_id, role) WHERE agent_group_id IS NULL;
-CREATE UNIQUE INDEX idx_user_roles_scoped_unique
-  ON user_roles(user_id, role, agent_group_id) WHERE agent_group_id IS NOT NULL;
 ```
 
 Invariants:
@@ -439,7 +435,6 @@ Several early migrations were later renamed/retired and replaced by "module" fil
 | 20 | `container-config-timezone` | `020-container-config-timezone.ts` | `container_configs.timezone` — per-agent-group timezone override (NULL = install-global) |
 | 21 | `approval-question-render-metadata` | `021-approval-question.ts` | `question` card-body column on all three approval tables so terminal edits retain the original request |
 | 22 | `messaging-group-detached-at` | `022-messaging-group-detached.ts` | `messaging_groups.detached_at` — records when the bot left a channel without deleting its wiring |
-| 23 | `user-roles-unique` | `023-user-roles-unique.ts` | Deduplicate legacy global grants and enforce separate unique keys for global and scoped roles |
 
 Numbers 5 and 6 are intentionally absent — migrations were renumbered during early development.
 

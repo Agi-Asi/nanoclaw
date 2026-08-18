@@ -23,6 +23,10 @@ vi.mock('../../container-runner.js', () => ({
   buildAgentGroupImage: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock('../../container-restart.js', () => ({
+  restartAgentGroupContainers: vi.fn().mockResolvedValue(0),
+}));
+
 vi.mock('../../config.js', async () => {
   const actual = await vi.importActual('../../config.js');
   return { ...actual, DATA_DIR: '/tmp/nanoclaw-test-cli-groups' };
@@ -34,6 +38,7 @@ import { initTestDb, closeDb, runMigrations, createAgentGroup, getDb } from '../
 import { createSession } from '../../db/sessions.js';
 import { dispatch } from '../dispatch.js';
 import { ensureContainerConfig, getContainerConfig } from '../../db/container-configs.js';
+import { restartAgentGroupContainers } from '../../container-restart.js';
 // Side-effect import: registers the `groups-*` commands (including delete).
 import './groups.js';
 
@@ -61,6 +66,17 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
   afterEach(async () => {
     await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
+  });
+
+  it('waits for host-side group restarts and returns their resolved count', async () => {
+    vi.mocked(restartAgentGroupContainers).mockResolvedValueOnce(3);
+
+    const response = await dispatch(
+      { id: 'req-restart', command: 'groups-restart', args: { id: 'ag-restart' } },
+      { caller: 'host' },
+    );
+
+    expect(response).toEqual({ id: 'req-restart', ok: true, data: { restarted: 3, rebuilt: false } });
   });
 
   it('deletes a group with sessions, destinations, approvals, members, roles, and wirings', async () => {

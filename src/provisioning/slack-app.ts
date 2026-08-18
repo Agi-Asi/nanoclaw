@@ -116,7 +116,27 @@ export const AGENT_BOT_EVENTS = ['app_home_opened', 'app_context_changed'];
 export const MANAGED_APP_DESCRIPTION =
   'Personal AI agent, provisioned and managed by the NanoClaw app. Learn more at nanoclaw.dev/slack.';
 
-export interface ManagedAppSpec {
+/**
+ * Optional fleet/operations attribution fields, all additive. On the broker
+ * transport they ride the POST /v1/apps HTTP body verbatim (sent only when
+ * defined — JSON serialization drops undefined values); a service that does
+ * not know them ignores them. They NEVER influence the Slack app manifest,
+ * scopes, or events, and the direct-Slack transport has nowhere to record
+ * them, so it ignores them entirely. Field names are the wire contract —
+ * snake_case, shared across every transport that provisions managed apps.
+ */
+export interface ProvisionAttribution {
+  /** Slack user id of the human who asked for this app, when known. */
+  requested_by?: string;
+  /** The creating agent's own Slack app id, when an agent created this agent. */
+  parent_app_id?: string;
+  /** Template name, when the app was stamped from one. */
+  template?: string;
+  /** The installing host's package.json version. */
+  client_version?: string;
+}
+
+export interface ManagedAppSpec extends ProvisionAttribution {
   name: string;
   description?: string;
   /**
@@ -525,7 +545,13 @@ export function mapBrokerApp(res: BrokerAppResponse): ProvisionedApp {
  */
 export async function brokerProvision(
   token: string,
-  spec: { team_id: string; name: string; description?: string; icon_url?: string; allow_guests?: boolean },
+  spec: {
+    team_id: string;
+    name: string;
+    description?: string;
+    icon_url?: string;
+    allow_guests?: boolean;
+  } & ProvisionAttribution,
 ): Promise<ProvisionedApp> {
   // Avatar-first: generate the avatar BEFORE the app exists so the bot's
   // first appearance already wears it — undefined degrades to the default icon.

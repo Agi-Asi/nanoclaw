@@ -13,7 +13,10 @@ import './cli.js';
 import './discord.js';
 
 // slack
-// import './slack.js';
+import './slack.js';
+// slack bot-authored inbound guard (registers the bridge inbound policy for
+// the 'slack' channel type — installs alongside the slack adapter)
+import './slack-a2a-guard.js';
 
 // telegram
 import './telegram.js';
@@ -44,6 +47,9 @@ import './whatsapp-cloud.js';
 
 // imessage
 import './imessage.js';
+
+// mattermost
+import './mattermost.js';
 
 // gmail (native, no Chat SDK)
 

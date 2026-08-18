@@ -1,0 +1,216 @@
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+
+import {
+  AGENT_BOT_EVENTS,
+  AGENT_BOT_SCOPES,
+  BOT_EVENTS,
+  BOT_SCOPES,
+  DEFAULT_SLACK_SERVICE_BASE,
+  MANAGED_APP_DESCRIPTION,
+  buildManagedAppManifest,
+  mapBrokerApp,
+  readInstallToken,
+  readManagerToken,
+  readServiceBase,
+} from './slack-app.js';
+
+interface ManifestShape {
+  display_information: { name: string; description: string };
+  features: {
+    bot_user: { display_name: string };
+    app_home: { messages_tab_enabled: boolean };
+    agent_view?: { agent_description: string };
+  };
+  oauth_config: { scopes: { bot: string[] } };
+  settings: {
+    socket_mode_enabled: boolean;
+    token_rotation_enabled: boolean;
+    event_subscriptions: { bot_events: string[] };
+  };
+}
+
+describe('buildManagedAppManifest', () => {
+  it('builds a socket-mode manifest; the default variant is agent-mode', () => {
+    const manifest = buildManagedAppManifest({ name: 'Trusty' }) as ManifestShape;
+
+    expect(manifest.display_information.name).toBe('Trusty');
+    expect(manifest.features.bot_user.display_name).toBe('Trusty');
+    expect(manifest.features.app_home.messages_tab_enabled).toBe(true);
+    // agent_view default: installs never fail; free workspaces degrade to a
+    // plain DM. The agent_description is the fixed attribution line.
+    expect(manifest.features.agent_view).toEqual({ agent_description: MANAGED_APP_DESCRIPTION });
+    expect(manifest.oauth_config.scopes.bot).toEqual([...BOT_SCOPES, ...AGENT_BOT_SCOPES]);
+    expect(manifest.settings.event_subscriptions.bot_events).toEqual([...BOT_EVENTS, ...AGENT_BOT_EVENTS]);
+    // Socket Mode is load-bearing: self-hosted installs have no public URL,
+    // and the adapter selects socket mode from SLACK_APP_TOKEN's presence.
+    expect(manifest.settings.socket_mode_enabled).toBe(true);
+    // The adapter has no refresh-token handling; rotation must stay off.
+    expect(manifest.settings.token_rotation_enabled).toBe(false);
+  });
+
+  it('agentView:false selects the plain variant (guest-accessible bots)', () => {
+    const manifest = buildManagedAppManifest({ name: 'Trusty', agentView: false }) as ManifestShape;
+    expect(manifest.features.agent_view).toBeUndefined();
+    expect(manifest.oauth_config.scopes.bot).toEqual(BOT_SCOPES);
+    expect(manifest.oauth_config.scopes.bot).not.toContain('assistant:write');
+    expect(manifest.settings.event_subscriptions.bot_events).toEqual(BOT_EVENTS);
+  });
+
+  it('never requests user scopes — bot-scopes-only is what makes auto-install eligible', () => {
+    for (const agentView of [true, false]) {
+      const manifest = buildManagedAppManifest({ name: 'x', agentView }) as {
+        oauth_config: { scopes: Record<string, unknown> };
+      };
+      expect(Object.keys(manifest.oauth_config.scopes)).toEqual(['bot']);
+    }
+  });
+});
+
+describe('readManagerToken', () => {
+  let dir: string | undefined;
+  afterEach(() => {
+    delete process.env.SLACK_MANAGER_TOKEN;
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  it('prefers process env over .env', () => {
+    process.env.SLACK_MANAGER_TOKEN = 'xoxp-from-env';
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-'));
+    fs.writeFileSync(path.join(dir, '.env'), 'SLACK_MANAGER_TOKEN=xoxp-from-file\n');
+    expect(readManagerToken(dir)).toBe('xoxp-from-env');
+  });
+
+  it('reads from .env, stripping quotes', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-'));
+    fs.writeFileSync(path.join(dir, '.env'), 'OTHER=1\nSLACK_MANAGER_TOKEN="xoxp-from-file"\n');
+    expect(readManagerToken(dir)).toBe('xoxp-from-file');
+  });
+
+  it('returns undefined when absent', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-'));
+    fs.writeFileSync(path.join(dir, '.env'), 'OTHER=1\n');
+    expect(readManagerToken(dir)).toBeUndefined();
+  });
+});
+
+describe('readServiceBase', () => {
+  let dir: string | undefined;
+  afterEach(() => {
+    delete process.env.SLACK_SERVICE_BASE;
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  it('defaults to the deployed service', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-'));
+    expect(readServiceBase(dir)).toBe(DEFAULT_SLACK_SERVICE_BASE);
+  });
+
+  it('prefers process env and strips trailing slashes', () => {
+    process.env.SLACK_SERVICE_BASE = 'https://slack-sandbox.example.dev/';
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-'));
+    expect(readServiceBase(dir)).toBe('https://slack-sandbox.example.dev');
+  });
+
+  it('reads from .env, stripping quotes', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-'));
+    fs.writeFileSync(path.join(dir, '.env'), 'SLACK_SERVICE_BASE="https://broker.example.test"\n');
+    expect(readServiceBase(dir)).toBe('https://broker.example.test');
+  });
+});
+
+describe('readInstallToken', () => {
+  let dir: string | undefined;
+  afterEach(() => {
+    delete process.env.NANOCLAW_REGISTRY_TOKEN;
+    if (dir) fs.rmSync(dir, { recursive: true, force: true });
+    dir = undefined;
+  });
+
+  const writeAccount = (configDir: string, content: string): void => {
+    fs.mkdirSync(configDir, { recursive: true });
+    fs.writeFileSync(path.join(configDir, 'account.json'), content);
+  };
+
+  it('reads the token from account.json (the enrollment convention)', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-'));
+    writeAccount(
+      dir,
+      JSON.stringify({ version: 1, api: 'https://registry.example', account_id: 'acct_1', token: 'nct_abc123' }),
+    );
+    expect(readInstallToken(process.cwd(), dir)).toBe('nct_abc123');
+  });
+
+  it('prefers NANOCLAW_REGISTRY_TOKEN from the process env', () => {
+    process.env.NANOCLAW_REGISTRY_TOKEN = 'nct_from_env';
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-'));
+    writeAccount(dir, JSON.stringify({ token: 'nct_from_file' }));
+    expect(readInstallToken(process.cwd(), dir)).toBe('nct_from_env');
+  });
+
+  it('returns undefined when no account file exists', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-'));
+    expect(readInstallToken(process.cwd(), dir)).toBeUndefined();
+  });
+
+  it('reads malformed or token-less files as "not enrolled" rather than throwing', () => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-'));
+    writeAccount(dir, 'not json{');
+    expect(readInstallToken(process.cwd(), dir)).toBeUndefined();
+    writeAccount(dir, JSON.stringify({ version: 1, token: '' }));
+    expect(readInstallToken(process.cwd(), dir)).toBeUndefined();
+    writeAccount(dir, JSON.stringify({ version: 1 }));
+    expect(readInstallToken(process.cwd(), dir)).toBeUndefined();
+    writeAccount(dir, JSON.stringify(['token']));
+    expect(readInstallToken(process.cwd(), dir)).toBeUndefined();
+  });
+});
+
+describe('mapBrokerApp', () => {
+  it('maps a fully auto-installed app into the ProvisionedApp shape', () => {
+    const app = mapBrokerApp({
+      app_id: 'A0TEST123',
+      team_id: 'T0TEAM456',
+      name: 'Trusty',
+      app_token: 'xapp-1-A0TEST123-x',
+      bot_token: 'xoxb-000-bot',
+      install_url: 'https://slack.com/oauth/install/A0TEST123',
+      install_error: null,
+    });
+    expect(app).toEqual({
+      appId: 'A0TEST123',
+      appToken: 'xapp-1-A0TEST123-x',
+      botToken: 'xoxb-000-bot',
+      installUrl: 'https://slack.com/oauth/install/A0TEST123',
+      installError: undefined,
+    });
+  });
+
+  it('maps a refused auto-install: null bot_token → undefined, install_error carried', () => {
+    const app = mapBrokerApp({
+      app_id: 'A0TEST123',
+      app_token: 'xapp-1-A0TEST123-x',
+      bot_token: null,
+      install_url: 'https://slack.com/oauth/install/A0TEST123',
+      install_error: 'app_approval_request_eligible',
+    });
+    expect(app.botToken).toBeUndefined();
+    expect(app.installError).toBe('app_approval_request_eligible');
+    expect(app.installUrl).toBe('https://slack.com/oauth/install/A0TEST123');
+  });
+
+  it('tolerates absent optional fields — installUrl falls back to empty string', () => {
+    const app = mapBrokerApp({ app_id: 'A1', app_token: 'xapp-1' });
+    expect(app).toEqual({
+      appId: 'A1',
+      appToken: 'xapp-1',
+      botToken: undefined,
+      installUrl: '',
+      installError: undefined,
+    });
+  });
+});

@@ -267,9 +267,70 @@ export function readManagerToken(projectRoot = process.cwd()): string | undefine
 // ---------------------------------------------------------------------------
 // Broker transport — the managed-Slack service at slack.nanoclaw.dev.
 
-/** Broker base URL: SLACK_SERVICE_BASE (process env or .env), else the default. */
-export function readServiceBase(projectRoot = process.cwd()): string {
-  const value = readEnvSetting('SLACK_SERVICE_BASE', projectRoot) ?? DEFAULT_SLACK_SERVICE_BASE;
+/** Per-user credential directory — where enrollment persists account.json. */
+function defaultConfigDir(): string {
+  return path.join(os.homedir(), '.config', 'nanoclaw');
+}
+
+/**
+ * The managed-Slack service belonging to a given account service.
+ *
+ * The two are halves of one deployment: this service authenticates the
+ * install token that service minted, so a token from one is not a credential
+ * at the other. Nothing on disk records the pairing, and the two are
+ * configured independently — which is how an install ends up presenting a
+ * token from one deployment to the other and reading the refusal as an
+ * outage.
+ *
+ * Host swap only, `registry.<rest>` → `slack.<rest>`, so a deployment that
+ * follows the same naming is derived correctly and one that does not yields
+ * undefined rather than a guess.
+ */
+export function slackServiceForRegistry(api: string | undefined): string | undefined {
+  if (!api) return undefined;
+  let url: URL;
+  try {
+    url = new URL(api);
+  } catch {
+    return undefined;
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') return undefined;
+  if (!url.hostname.startsWith('registry.')) return undefined;
+  url.hostname = `slack.${url.hostname.slice('registry.'.length)}`;
+  // `origin` drops any path, query and userinfo the credential recorded.
+  return url.origin;
+}
+
+/** The account service that issued the credential on disk, if it recorded one. */
+function readAccountApi(configDir: string): string | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(fs.readFileSync(path.join(configDir, 'account.json'), 'utf-8'));
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  const api = (parsed as { api?: unknown }).api;
+  return typeof api === 'string' && api.trim() ? api.trim() : undefined;
+}
+
+/**
+ * Broker base URL: SLACK_SERVICE_BASE (process env or .env) first, then the
+ * service implied by whoever issued the credential we are about to send, and
+ * only then the default.
+ *
+ * Deriving beats defaulting because the credential is the thing being spent:
+ * pairing it with a service that cannot know it produces a 401 that reads as
+ * "Slack is down". An explicit setting still wins — pointing the two halves
+ * at different deployments is a thing an operator may need to do deliberately.
+ *
+ * A token supplied through NANOCLAW_REGISTRY_TOKEN has no account record to
+ * derive from and falls through to the default, so a CI caller retargeting
+ * the service must set SLACK_SERVICE_BASE too.
+ */
+export function readServiceBase(projectRoot = process.cwd(), configDir = defaultConfigDir()): string {
+  const explicit = readEnvSetting('SLACK_SERVICE_BASE', projectRoot);
+  const value = explicit ?? slackServiceForRegistry(readAccountApi(configDir)) ?? DEFAULT_SLACK_SERVICE_BASE;
   return value.replace(/\/+$/, '');
 }
 
@@ -286,10 +347,7 @@ export function readServiceBase(projectRoot = process.cwd()): string {
  * `readManagerToken` but the credential is deliberately per-user;
  * `configDir` is overridable for tests only.
  */
-export function readInstallToken(
-  _projectRoot = process.cwd(),
-  configDir = path.join(os.homedir(), '.config', 'nanoclaw'),
-): string | undefined {
+export function readInstallToken(_projectRoot = process.cwd(), configDir = defaultConfigDir()): string | undefined {
   const fromEnv = process.env.NANOCLAW_REGISTRY_TOKEN?.trim();
   if (fromEnv) return fromEnv;
   let parsed: unknown;

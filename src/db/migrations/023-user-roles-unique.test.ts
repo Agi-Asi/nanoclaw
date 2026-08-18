@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { closeDb, initTestDb } from '../connection.js';
+import { closeDb, initSqliteTestDb } from '../connection.js';
 import { sqliteRaw } from '../drivers/sqlite.js';
 import { lookup } from '../../cli/registry.js';
 import { migration023 } from './023-user-roles-unique.js';
@@ -11,7 +11,7 @@ afterEach(async () => await closeDb());
 
 describe('user-roles-unique migration', () => {
   it('deduplicates nullable global grants and enforces both logical key shapes', async () => {
-    const db = await initTestDb();
+    const db = await initSqliteTestDb();
     await runMigrations(
       db,
       migrations.filter((migration) => migration.name !== migration023.name),
@@ -41,7 +41,7 @@ describe('user-roles-unique migration', () => {
   });
 
   it('makes repeated global grants through ncl idempotent', async () => {
-    const db = await initTestDb();
+    const db = await initSqliteTestDb();
     await runMigrations(db);
     sqliteRaw(db)
       .prepare('INSERT INTO users (id, kind, created_at) VALUES (?, ?, ?)')

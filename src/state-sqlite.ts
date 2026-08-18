@@ -229,16 +229,26 @@ export class SqliteStateAdapter implements StateAdapter {
 
   async dequeue(threadId: string): Promise<QueueEntry | null> {
     const key = this.k(`queue:${threadId}`);
-    const row = await this.db.get<{ value: string }>(
-      `DELETE FROM chat_sdk_lists
-             WHERE key = ?
-               AND idx = (SELECT MIN(idx) FROM chat_sdk_lists WHERE key = ?)
-         RETURNING value`,
-      key,
-      key,
-    );
-    if (!row) return null;
-    return JSON.parse(row.value) as QueueEntry;
+    for (;;) {
+      const row = await this.db.get<{ value: string }>(
+        `DELETE FROM chat_sdk_lists
+               WHERE key = ?
+                 AND idx = (SELECT MIN(idx) FROM chat_sdk_lists WHERE key = ?)
+           RETURNING value`,
+        key,
+        key,
+      );
+      if (row) return JSON.parse(row.value) as QueueEntry;
+
+      // Concurrent statements on an MVCC backend can snapshot the same
+      // MIN(idx). The loser returns no row after the winner commits; retry
+      // only when a fresh statement can see another queued item.
+      const remaining = await this.db.get<{ present: number }>(
+        'SELECT 1 AS present FROM chat_sdk_lists WHERE key = ? LIMIT 1',
+        key,
+      );
+      if (!remaining) return null;
+    }
   }
 
   async queueDepth(threadId: string): Promise<number> {

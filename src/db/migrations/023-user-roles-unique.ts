@@ -10,6 +10,7 @@ import type { Migration } from './index.js';
 export const migration023: Migration = {
   version: 23,
   name: 'user-roles-unique',
+  sqliteOnly: true,
   up(db) {
     db.exec(`
       DELETE FROM user_roles

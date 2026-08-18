@@ -116,7 +116,7 @@ export function wakeContainer(session: Session): Promise<boolean> {
 }
 
 async function spawnContainer(session: Session): Promise<void> {
-  const agentGroup = getAgentGroup(session.agent_group_id);
+  const agentGroup = await getAgentGroup(session.agent_group_id);
   if (!agentGroup) {
     log.error('Agent group not found', { agentGroupId: session.agent_group_id });
     return;
@@ -125,33 +125,33 @@ async function spawnContainer(session: Session): Promise<void> {
   // Refresh the destination map and current-thread routing so any admin
   // changes take effect on wake. Destinations come from the agent-to-agent
   // module — skip when the module isn't installed (table absent).
-  if (hasTable(getDb(), 'agent_destinations')) {
+  if (await hasTable(getDb(), 'agent_destinations')) {
     const { writeDestinations } = await import('./modules/agent-to-agent/write-destinations.js');
-    writeDestinations(agentGroup.id, session.id);
+    await writeDestinations(agentGroup.id, session.id);
   }
-  writeSessionRouting(agentGroup.id, session.id);
+  await writeSessionRouting(agentGroup.id, session.id);
 
   // Materialize container.json from DB — writes fresh file and returns
   // the config object, threaded through provider resolution, buildMounts,
   // and buildContainerArgs so we don't re-read.
-  const containerConfig = materializeContainerJson(agentGroup.id);
+  const containerConfig = await materializeContainerJson(agentGroup.id);
 
   // Per-group filesystem state lives forever after first creation. Init is
   // idempotent: it only writes paths that don't already exist, so this call
   // is a no-op for groups that have spawned before. Runs before the provider
   // contribution so a surfaces-providing provider finds the group dir ready.
   const providerName = resolveProviderName(session.agent_provider, containerConfig.provider);
-  initGroupFilesystem(agentGroup, { provider: providerName });
+  await initGroupFilesystem(agentGroup, { provider: providerName });
 
   // Resolve the effective provider + any host-side contribution it declares
   // (extra mounts, env passthrough). Computed once and threaded through both
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
-  const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
+  const { provider, contribution } = await resolveProviderContribution(session, agentGroup, containerConfig);
 
-  const mounts = buildMounts(agentGroup, session, containerConfig, provider, contribution);
+  const mounts = await buildMounts(agentGroup, session, containerConfig, provider, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
-  // sessions and reversible via getAgentGroup() for approval routing.
+  // sessions and reversible via await getAgentGroup() for approval routing.
   const agentIdentifier = agentGroup.id;
   const args = await buildContainerArgs(
     mounts,
@@ -174,7 +174,7 @@ async function spawnContainer(session: Session): Promise<void> {
   const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
   activeContainers.set(session.id, { process: container, containerName, startedAtMs: Date.now() });
-  markContainerRunning(session.id);
+  await markContainerRunning(session.id);
 
   // Log stderr. A container that dies at boot (unknown provider, missing
   // binary, bad config) explains itself only here — and debug is below the
@@ -199,7 +199,7 @@ async function spawnContainer(session: Session): Promise<void> {
 
   container.on('close', (code) => {
     activeContainers.delete(session.id);
-    markContainerStopped(session.id);
+    void markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     // code null = killed by signal (normal shutdown path), not a boot failure.
     if (code !== 0 && code !== null && stderrTail.length > 0) {
@@ -211,7 +211,7 @@ async function spawnContainer(session: Session): Promise<void> {
 
   container.on('error', (err) => {
     activeContainers.delete(session.id);
-    markContainerStopped(session.id);
+    void markContainerStopped(session.id);
     stopTypingRefresh(session.id);
     log.error('Container spawn error', { sessionId: session.id, err });
   });
@@ -273,15 +273,15 @@ export function hardeningArgs(pidsLimit: string): string[] {
   return args;
 }
 
-function resolveProviderContribution(
+async function resolveProviderContribution(
   session: Session,
   agentGroup: AgentGroup,
   containerConfig: import('./container-config.js').ContainerConfig,
-): { provider: string; contribution: ProviderContainerContribution } {
+): Promise<{ provider: string; contribution: ProviderContainerContribution }> {
   const provider = resolveProviderName(session.agent_provider, containerConfig.provider);
   const fn = getProviderContainerConfig(provider);
   const contribution = fn
-    ? fn({
+    ? await fn({
         sessionDir: sessionDir(agentGroup.id, session.id),
         agentGroupId: agentGroup.id,
         groupDir: path.resolve(GROUPS_DIR, agentGroup.folder),
@@ -292,13 +292,13 @@ function resolveProviderContribution(
   return { provider, contribution };
 }
 
-export function buildMounts(
+export async function buildMounts(
   agentGroup: AgentGroup,
   session: Session,
   containerConfig: import('./container-config.js').ContainerConfig,
   provider: string,
   providerContribution: ProviderContainerContribution,
-): VolumeMount[] {
+): Promise<VolumeMount[]> {
   const projectRoot = process.cwd();
 
   // Default agent surfaces (composed project doc, skill links, provider state
@@ -313,7 +313,7 @@ export function buildMounts(
 
     // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
     // fragments, and MCP server instructions. See `claude-md-compose.ts`.
-    composeGroupClaudeMd(agentGroup);
+    await composeGroupClaudeMd(agentGroup);
   }
 
   const mounts: VolumeMount[] = [];
@@ -561,10 +561,10 @@ const execAsync = promisify(exec);
 
 /** Build a per-agent-group Docker image with custom packages. */
 export async function buildAgentGroupImage(agentGroupId: string): Promise<void> {
-  const agentGroup = getAgentGroup(agentGroupId);
+  const agentGroup = await getAgentGroup(agentGroupId);
   if (!agentGroup) throw new Error('Agent group not found');
 
-  const configRow = getContainerConfig(agentGroup.id);
+  const configRow = await getContainerConfig(agentGroup.id);
   if (!configRow) throw new Error('Container config not found');
   const aptPackages = JSON.parse(configRow.packages_apt) as string[];
   const npmPackages = JSON.parse(configRow.packages_npm) as string[];
@@ -630,7 +630,7 @@ export async function buildAgentGroupImage(agentGroupId: string): Promise<void> 
   }
 
   // Store the image tag in the DB
-  updateContainerConfigScalars(agentGroup.id, { image_tag: imageTag });
+  await updateContainerConfigScalars(agentGroup.id, { image_tag: imageTag });
 
   log.info('Per-agent-group image built', { agentGroupId, imageTag });
 }

@@ -20,6 +20,7 @@
 import fs from 'fs';
 
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest';
+import { sqliteRaw } from '../../db/drivers/sqlite.js';
 
 vi.mock('../../container-runner.js', () => ({
   wakeContainer: vi.fn().mockResolvedValue(undefined),
@@ -40,8 +41,8 @@ vi.mock('../../config.js', async () => {
 vi.mock('../../group-init.js', async () => {
   const { ensureContainerConfig } = await import('../../db/container-configs.js');
   return {
-    initGroupFilesystem: vi.fn((group: { id: string }) => {
-      ensureContainerConfig(group.id);
+    initGroupFilesystem: vi.fn(async (group: { id: string }) => {
+      await ensureContainerConfig(group.id);
     }),
   };
 });
@@ -69,21 +70,21 @@ function send(command: string, args: Record<string, unknown>) {
 }
 function count(sql: string, ...params: unknown[]): number {
   return (
-    getDb()
+    sqliteRaw(getDb())
       .prepare(sql)
       .get(...params) as { c: number }
   ).c;
 }
 
 describe('programmatic wiring verbs', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
     fs.mkdirSync(TEST_DIR, { recursive: true });
-    runMigrations(initTestDb());
-    createAgentGroup({ id: 'ag-1', name: 'Nano', folder: 'nano', agent_provider: null, created_at: now() });
+    await runMigrations(await initTestDb());
+    await createAgentGroup({ id: 'ag-1', name: 'Nano', folder: 'nano', agent_provider: null, created_at: now() });
   });
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   });
 

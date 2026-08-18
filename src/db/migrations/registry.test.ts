@@ -30,7 +30,7 @@ async function freshRegistry() {
 
 async function freshTestDb() {
   const connection = await import('../connection.js');
-  const db = await connection.initTestDb();
+  const db = await connection.initSqliteTestDb();
   closeCurrentDb = connection.closeDb;
   return db;
 }

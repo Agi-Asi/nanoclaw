@@ -79,15 +79,15 @@ function generateId(): string {
  * - 'agent-shared': one session per agent group — all messaging groups
  *   wired with this mode share a single session (e.g. GitHub + Slack)
  */
-export function resolveSession(
+export async function resolveSession(
   agentGroupId: string,
   messagingGroupId: string | null,
   threadId: string | null,
   sessionMode: 'shared' | 'per-thread' | 'agent-shared',
-): { session: Session; created: boolean } {
+): Promise<{ session: Session; created: boolean }> {
   // agent-shared: single session per agent group, regardless of messaging group
   if (sessionMode === 'agent-shared') {
-    const existing = findSessionByAgentGroup(agentGroupId);
+    const existing = await findSessionByAgentGroup(agentGroupId);
     if (existing) {
       return { session: existing, created: false };
     }
@@ -95,7 +95,7 @@ export function resolveSession(
     const lookupThreadId = sessionMode === 'shared' ? null : threadId;
     // Scope lookup by agent_group_id so fan-out to multiple agents in the
     // same chat doesn't accidentally deliver to the wrong agent's session.
-    const existing = findSessionForAgent(agentGroupId, messagingGroupId, lookupThreadId);
+    const existing = await findSessionForAgent(agentGroupId, messagingGroupId, lookupThreadId);
     if (existing) {
       return { session: existing, created: false };
     }
@@ -115,7 +115,7 @@ export function resolveSession(
     created_at: new Date().toISOString(),
   };
 
-  createSession(session);
+  await createSession(session);
   initSessionFolder(agentGroupId, id);
   log.info('Session created', { id, agentGroupId, messagingGroupId, threadId: lookupThreadId, sessionMode });
 
@@ -124,9 +124,12 @@ export function resolveSession(
 
 /** Find or create the per-agent-group session used for scheduled tasks. */
 /** Find or create the isolated session for one task series (thread `system:tasks:<seriesId>`). */
-export function resolveTaskSession(agentGroupId: string, seriesId: string): { session: Session; created: boolean } {
+export async function resolveTaskSession(
+  agentGroupId: string,
+  seriesId: string,
+): Promise<{ session: Session; created: boolean }> {
   const threadId = taskThreadId(seriesId);
-  const existing = findSystemSession(agentGroupId, threadId);
+  const existing = await findSystemSession(agentGroupId, threadId);
   if (existing) return { session: existing, created: false };
 
   const id = generateId();
@@ -142,7 +145,7 @@ export function resolveTaskSession(agentGroupId: string, seriesId: string): { se
     created_at: new Date().toISOString(),
   };
 
-  createSession(session);
+  await createSession(session);
   initSessionFolder(agentGroupId, id);
   log.info('Task session created', { id, agentGroupId, seriesId });
 
@@ -170,17 +173,17 @@ export function initSessionFolder(agentGroupId: string, sessionId: string): void
  * writeDestinations() (when installed) so the latest routing is always in
  * place, including after admin rewiring.
  */
-export function writeSessionRouting(agentGroupId: string, sessionId: string): void {
+export async function writeSessionRouting(agentGroupId: string, sessionId: string): Promise<void> {
   const dbPath = inboundDbPath(agentGroupId, sessionId);
   if (!fs.existsSync(dbPath)) return;
 
-  const session = getSession(sessionId);
+  const session = await getSession(sessionId);
   if (!session) return;
 
   let channelType: string | null = null;
   let platformId: string | null = null;
   if (session.messaging_group_id) {
-    const mg = getMessagingGroup(session.messaging_group_id);
+    const mg = await getMessagingGroup(session.messaging_group_id);
     if (mg) {
       channelType = mg.channel_type;
       platformId = mg.platform_id;
@@ -207,7 +210,7 @@ export function writeSessionRouting(agentGroupId: string, sessionId: string): vo
  * long-lived connection — see the "Cross-mount visibility invariants" note
  * at the top of this file.
  */
-export function writeSessionMessage(
+export async function writeSessionMessage(
   agentGroupId: string,
   sessionId: string,
   message: {
@@ -239,7 +242,7 @@ export function writeSessionMessage(
      */
     onWake?: 0 | 1;
   },
-): void {
+): Promise<void> {
   // Documented reset: operators `rm -rf` a session folder to clear a stuck
   // session. The sessions row survives, so the next message takes the
   // existing-session path and lands here with a missing inbound.db — the open
@@ -273,7 +276,7 @@ export function writeSessionMessage(
     db.close();
   }
 
-  updateSession(sessionId, { last_active: new Date().toISOString() });
+  await updateSession(sessionId, { last_active: new Date().toISOString() });
 }
 
 /**
@@ -539,16 +542,16 @@ export function clearOutbox(agentGroupId: string, sessionId: string, messageId: 
 }
 
 /** Mark a container as running for a session. */
-export function markContainerRunning(sessionId: string): void {
-  updateSession(sessionId, { container_status: 'running', last_active: new Date().toISOString() });
+export async function markContainerRunning(sessionId: string): Promise<void> {
+  await updateSession(sessionId, { container_status: 'running', last_active: new Date().toISOString() });
 }
 
 /** Mark a container as idle for a session. */
-export function markContainerIdle(sessionId: string): void {
-  updateSession(sessionId, { container_status: 'idle' });
+export async function markContainerIdle(sessionId: string): Promise<void> {
+  await updateSession(sessionId, { container_status: 'idle' });
 }
 
 /** Mark a container as stopped for a session. */
-export function markContainerStopped(sessionId: string): void {
-  updateSession(sessionId, { container_status: 'stopped' });
+export async function markContainerStopped(sessionId: string): Promise<void> {
+  await updateSession(sessionId, { container_status: 'stopped' });
 }

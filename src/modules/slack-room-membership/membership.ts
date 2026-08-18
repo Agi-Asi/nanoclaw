@@ -513,6 +513,85 @@ function resolveInstanceAgentGroup(instance: string): { id: string; name: string
 
 /** Sender identity off an inbound payload — top-level senderId/sender (v1,
  *  synthesized events) or the chat-sdk bridge's nested author.userId. */
+/**
+ * Dedupe key for the owner-absent channel decline. Constant on purpose — the
+ * decline describes the channel, so it fires once per channel per the stamp's
+ * 24h window regardless of who triggered it.
+ */
+const CHANNEL_DECLINE_KEY = 'channel:requires-owner';
+
+/**
+ * Owner-absent channel invite: decline it in place instead of asking the
+ * owner to rule on it.
+ *
+ * Slack lets any workspace member add an installed app to a channel, and the
+ * bot shows up in the member list immediately — visibly present before its
+ * owner has consented to anything. The host already keeps it inert, so the
+ * gap this closes is expectation, not authorization: everyone in the channel
+ * sees a bot that looks like it is listening, and the only person told
+ * otherwise was the owner.
+ *
+ * Three effects, none of them a wiring: one line in the channel explaining
+ * the bot cannot be connected by whoever invited it and asking to be removed,
+ * an informational FYI to the owner, and a dropped-message record. Nothing is
+ * routed — the caller returns 'handled', so `requestChannelApproval` never
+ * builds a card.
+ *
+ * The bot cannot remove itself: `conversations.leave` needs a channel write
+ * scope the app does not carry, so the message has to ask a human.
+ *
+ * Dedupe is per CHANNEL, not per sender (declineAndNotify's default): the
+ * decline is a fact about the conversation, and a second person mentioning
+ * the bot should not produce a second post.
+ */
+async function declineChannelInvite(args: {
+  mg: MessagingGroup;
+  event: InboundEvent;
+  agentGroup: { id: string; name: string } | undefined;
+  channelName: string | null;
+}): Promise<'handled'> {
+  const { mg, event, agentGroup, channelName } = args;
+  const sender = senderFromEvent(event);
+  const where = channelName ? `#${channelName}` : 'a channel';
+  const who = sender.name ?? sender.userId ?? 'Someone';
+
+  try {
+    recordDroppedMessage({
+      channel_type: 'slack',
+      platform_id: event.platformId,
+      user_id: sender.userId,
+      sender_name: sender.name,
+      reason: 'channel_requires_owner',
+      messaging_group_id: mg.id,
+      agent_group_id: agentGroup?.id ?? null,
+    });
+
+    await declineAndNotify({
+      messagingGroupId: mg.id,
+      agentGroupId: agentGroup?.id ?? null,
+      senderIdentity: sender.userId,
+      senderName: sender.name,
+      event,
+      dedupeKey: CHANNEL_DECLINE_KEY,
+      declineText:
+        "I can only be connected to a channel by my owner, so I won't respond here. " +
+        'Please remove me from this channel — if my owner wants me here, they can add me back.',
+      fyiText:
+        `FYI: ${who} added your agent to ${where} on Slack. Only you can connect it there, so it ` +
+        'declined in the channel and asked to be removed. Add it yourself if you do want it there.',
+    });
+  } catch (err) {
+    // Fail closed to 'handled': the point of this branch is that an
+    // owner-absent channel invite does not become a card, and a delivery
+    // failure must not resurrect one.
+    log.error('slack-room-membership: channel decline path failed — suppressed', {
+      messagingGroupId: mg.id,
+      err,
+    });
+  }
+  return 'handled';
+}
+
 function senderFromEvent(event: InboundEvent): { userId: string | null; name: string | null } {
   try {
     const parsed = JSON.parse(event.message.content) as Record<string, unknown>;
@@ -571,10 +650,13 @@ export async function slackChannelCardInterceptor(
   const channelId = mg.platform_id.startsWith('slack:') ? mg.platform_id.slice('slack:'.length) : mg.platform_id;
 
   // USLACKBOT backstop: shadow channels are never conversations to card.
+  // The same lookup classifies the conversation for the owner-absent branch
+  // below (MPIM vs channel) — one round trip, not two.
+  let convInfo: { isMpim: boolean; name?: string; creator?: string } | null = null;
   if (token) {
     try {
-      const info = await slackConversationsInfo(token, channelId, 'membership');
-      if (info.creator === 'USLACKBOT') {
+      convInfo = await slackConversationsInfo(token, channelId, 'membership');
+      if (convInfo.creator === 'USLACKBOT') {
         log.debug('Ignoring Slackbot-created shadow channel (card path)', { channelId });
         return 'handled';
       }
@@ -647,7 +729,17 @@ export async function slackChannelCardInterceptor(
     log.warn('slack-room-membership: conversations.members failed — falling back to the card', { channelId, err });
     return 'card';
   }
-  if (!ownerIds.some((id) => members.includes(id))) return 'card'; // owner absent → notify-and-ask
+  if (!ownerIds.some((id) => members.includes(id))) {
+    // Owner absent. A named channel is a surface anyone in the workspace can
+    // drag the bot into, and Slack shows it as a member the moment they do —
+    // before its owner has agreed to anything. Rather than ask the owner to
+    // adjudicate an invitation they did not make, decline it the way an
+    // unknown DM is declined: say so in the channel, tell the owner, wire
+    // nothing. MPIMs keep the card — a group DM is a deliberate, small,
+    // named set of people, and its invite is a normal ask.
+    if (convInfo?.isMpim !== false) return 'card';
+    return declineChannelInvite({ mg, event, agentGroup, channelName: convInfo.name ?? null });
+  }
 
   if (!agentGroup) {
     log.warn('slack-room-membership: owner present but instance→agent-group resolution is ambiguous — card', {

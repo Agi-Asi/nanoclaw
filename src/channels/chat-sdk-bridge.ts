@@ -700,7 +700,7 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
           const startedAt = Date.now();
           // Capture the long-running listener promise via waitUntil
           let listenerPromise: Promise<unknown> | undefined;
-          gatewayAdapter.startGatewayListener!(
+          void gatewayAdapter.startGatewayListener!(
             {
               waitUntil: (p: Promise<unknown>) => {
                 listenerPromise = p;
@@ -709,34 +709,38 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
             24 * 60 * 60 * 1000,
             gatewayAbort!.signal,
             webhookUrl,
-          ).then(() => {
-            // startGatewayListener resolves immediately with a Response;
-            // the actual work is in the listenerPromise passed to waitUntil
-            if (!listenerPromise) return;
-            const reschedule = (err?: unknown) => {
-              if (gatewayAbort?.signal.aborted) return;
-              const ranForMs = Date.now() - startedAt;
-              if (ranForMs > 5 * 60 * 1000) consecutiveFailures = 0;
-              else consecutiveFailures++;
-              const delayMs = Math.min(60 * 60 * 1000, 2 ** consecutiveFailures * 1000);
-              if (err) {
-                log.error('Gateway listener error, retrying', {
-                  adapter: adapter.name,
-                  err,
-                  consecutiveFailures,
-                  delayMs,
-                });
-              } else {
-                log.info('Gateway listener expired, restarting', {
-                  adapter: adapter.name,
-                  consecutiveFailures,
-                  delayMs,
-                });
-              }
-              setTimeout(startGateway, delayMs);
-            };
-            listenerPromise.then(() => reschedule()).catch(reschedule);
-          });
+          )
+            .then(() => {
+              // startGatewayListener resolves immediately with a Response;
+              // the actual work is in the listenerPromise passed to waitUntil
+              if (!listenerPromise) return;
+              const reschedule = (err?: unknown) => {
+                if (gatewayAbort?.signal.aborted) return;
+                const ranForMs = Date.now() - startedAt;
+                if (ranForMs > 5 * 60 * 1000) consecutiveFailures = 0;
+                else consecutiveFailures++;
+                const delayMs = Math.min(60 * 60 * 1000, 2 ** consecutiveFailures * 1000);
+                if (err) {
+                  log.error('Gateway listener error, retrying', {
+                    adapter: adapter.name,
+                    err,
+                    consecutiveFailures,
+                    delayMs,
+                  });
+                } else {
+                  log.info('Gateway listener expired, restarting', {
+                    adapter: adapter.name,
+                    consecutiveFailures,
+                    delayMs,
+                  });
+                }
+                setTimeout(startGateway, delayMs);
+              };
+              void listenerPromise.then(() => reschedule()).catch(reschedule);
+            })
+            .catch((err) => {
+              log.error('Gateway listener failed to start', { adapter: adapter.name, err });
+            });
         };
         startGateway();
         log.info('Gateway listener started', { adapter: adapter.name });

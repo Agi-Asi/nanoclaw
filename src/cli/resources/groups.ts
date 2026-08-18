@@ -339,7 +339,7 @@ registerResource({
             message
               ? () => {
                   const s = getSession(ctx.sessionId);
-                  if (s) wakeContainer(s);
+                  if (s) void wakeContainer(s);
                 }
               : undefined,
           );

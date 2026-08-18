@@ -35,11 +35,82 @@ if (!dbPath || sql === undefined) {
   process.exit(2);
 }
 
+/**
+ * Replace quoted values, quoted identifiers, and comments with whitespace
+ * before looking for statement keywords. A word such as "UPDATE" in a CTE's
+ * string literal or comment says nothing about whether the outer statement
+ * returns rows.
+ */
+function maskSqlNonCode(statement: string): string {
+  let masked = '';
+  let i = 0;
+  const blank = (value: string): string => value.replace(/[^\n]/g, ' ');
+
+  while (i < statement.length) {
+    const rest = statement.slice(i);
+
+    if (rest.startsWith('--')) {
+      const end = statement.indexOf('\n', i + 2);
+      const next = end === -1 ? statement.length : end + 1;
+      masked += blank(statement.slice(i, next));
+      i = next;
+      continue;
+    }
+
+    if (rest.startsWith('/*')) {
+      const end = statement.indexOf('*/', i + 2);
+      const next = end === -1 ? statement.length : end + 2;
+      masked += blank(statement.slice(i, next));
+      i = next;
+      continue;
+    }
+
+    const dollarTag = rest.match(/^\$[A-Za-z_][A-Za-z0-9_]*\$|^\$\$/)?.[0];
+    if (dollarTag) {
+      const end = statement.indexOf(dollarTag, i + dollarTag.length);
+      const next = end === -1 ? statement.length : end + dollarTag.length;
+      masked += blank(statement.slice(i, next));
+      i = next;
+      continue;
+    }
+
+    const quote = statement[i];
+    if (quote === "'" || quote === '"' || quote === '`') {
+      let next = i + 1;
+      while (next < statement.length) {
+        if (statement[next] !== quote) {
+          next++;
+          continue;
+        }
+        if (statement[next + 1] === quote) {
+          next += 2;
+          continue;
+        }
+        next++;
+        break;
+      }
+      masked += blank(statement.slice(i, next));
+      i = next;
+      continue;
+    }
+
+    if (quote === '[') {
+      const end = statement.indexOf(']', i + 1);
+      const next = end === -1 ? statement.length : end + 1;
+      masked += blank(statement.slice(i, next));
+      i = next;
+      continue;
+    }
+
+    masked += quote;
+    i++;
+  }
+
+  return masked;
+}
+
 function isQuery(statement: string): boolean {
-  const normalized = statement
-    .trim()
-    .replace(/^(?:--[^\n]*\n|\/\*[\s\S]*?\*\/\s*)*/g, '')
-    .toUpperCase();
+  const normalized = maskSqlNonCode(statement).trim().toUpperCase();
   if (normalized.startsWith('SELECT')) return true;
   if (!normalized.startsWith('WITH')) return false;
   return !/\b(?:INSERT|UPDATE|DELETE)\b/.test(normalized);

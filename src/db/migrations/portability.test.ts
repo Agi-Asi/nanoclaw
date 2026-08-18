@@ -23,7 +23,6 @@ const FROZEN_SQLITE_ONLY = new Set([
   'wiring-threads-override',
   'container-config-timezone',
   'approval-question-render-metadata',
-  'user-roles-unique',
 ]);
 
 const BANNED_PORTABLE_SQL = [

@@ -108,6 +108,20 @@ describe('scripts/q.ts', () => {
     expect(rows).toEqual([{ name: 'bob' }]);
   });
 
+  it('does not mistake mutation words inside WITH query string literals for statements', () => {
+    const r = run("WITH words AS (SELECT 'UPDATE' AS word) SELECT word FROM words");
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout.trim()).toBe('UPDATE');
+  });
+
+  it('does not mistake mutation words inside WITH query comments for statements', () => {
+    const r = run('WITH rows AS (SELECT id FROM t /* DELETE */) SELECT COUNT(*) FROM rows -- INSERT');
+
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout.trim()).toBe('2');
+  });
+
   it('exits 2 with usage when args are missing', () => {
     const r = spawnSync('pnpm', ['exec', 'tsx', Q], {
       encoding: 'utf-8',

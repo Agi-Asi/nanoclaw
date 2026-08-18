@@ -10,8 +10,12 @@ const directives = parseDirectives(slack);
 describe('skill-directives parser, on the converted add-slack', () => {
   it('extracts every directive in document order — install, credentials, resolve, restart', () => {
     expect(directives.map((d) => d.kind)).toEqual([
-      'copy', // step 1: adapter + test from the channels branch
-      'append', // step 2: barrel registration
+      'copy', // step 1: the full channel payload from the channels branch
+      'append', // step 2: channel barrel — adapter registration
+      'append', // step 2: channel barrel — bot-inbound guard
+      'append', // step 2: modules barrel — membership, canvas, onboarding
+      'append', // step 2: container tool barrel — canvas tool
+      'append', // step 2: companion-skill declaration (registerCompanionSkills)
       'dep', // step 3: pinned package
       'run', // step 4: build
       'run', // step 4: test
@@ -20,9 +24,11 @@ describe('skill-directives parser, on the converted add-slack', () => {
       'operator', // credentials: create-app walkthrough, webhook variant
       'prompt', // credentials: capture bot token
       'prompt', // credentials: capture app-level token (socket only)
+      'prompt', // credentials: app-level token twin (provisioned mode — binds from inputs)
       'prompt', // credentials: capture signing secret (webhook only)
       'env-set', // credentials: bot token (both modes)
       'env-set', // credentials: app token — doubles as the Socket Mode switch
+      'env-set', // credentials: app token, provisioned-mode twin
       'env-set', // credentials: signing secret (webhook only)
       'operator', // credentials: event-delivery walkthrough (webhook only)
       'prompt', // resolve: owner member id (owner_handle)
@@ -54,15 +60,67 @@ describe('skill-directives parser, on the converted add-slack', () => {
     expect(copy.attrs['from-branch']).toBe('channels');
     expect(copy.body).toEqual([
       'src/channels/slack.ts',
+      'src/channels/slack-lib.ts',
+      'src/channels/slack-lib.test.ts',
+      'src/channels/slack-a2a-guard.ts',
+      'src/channels/slack-a2a-guard.test.ts',
       'src/channels/slack-registration.test.ts',
+      'src/channels/slack-instances-registration.test.ts',
+      'src/env-file.ts',
+      'src/env-file.test.ts',
+      'src/provisioning/slack-app.ts',
+      'src/provisioning/slack-app.test.ts',
+      'src/modules/slack-room-membership/index.ts',
+      'src/modules/slack-room-membership/membership.ts',
+      'src/modules/slack-room-membership/membership.test.ts',
+      'src/modules/slack-room-membership/env-file.ts',
+      'src/modules/slack-room-membership/env-file.test.ts',
+      'src/modules/canvas-actions/index.ts',
+      'src/modules/canvas-actions/handlers.ts',
+      'src/modules/canvas-actions/canvas-api.ts',
+      'src/modules/canvas-actions/canvas-actions.test.ts',
+      'src/modules/slack-onboarding/index.ts',
+      'src/modules/slack-onboarding/onboarding.test.ts',
+      'src/modules/slack-onboarding/thread-title.test.ts',
+      'container/agent-runner/src/mcp-tools/canvas.ts',
+      'container/agent-runner/src/mcp-tools/canvas.instructions.md',
+      'container/agent-runner/src/mcp-tools/canvas.test.ts',
+      'container/skills/slack-construct/SKILL.md',
+      'container/skills/slack-construct/instructions.md',
+      'container/skills/canvas-work/SKILL.md',
       'container/skills/slack-formatting/SKILL.md',
+      'container/skills/welcome/addenda/slack.md',
+      'setup/channels/slack-companions.ts',
     ]);
   });
 
-  it('reads the barrel append target and line', () => {
-    const append = directives.find((d) => d.kind === 'append')!;
-    expect(append.attrs.to).toBe('src/channels/index.ts');
-    expect(append.body).toEqual(["import './slack.js';"]);
+  it('reads the barrel appends: adapter, guard, modules, container tool, companions', () => {
+    const appends = directives.filter((d) => d.kind === 'append');
+    expect(appends.map((d) => d.attrs.to)).toEqual([
+      'src/channels/index.ts',
+      'src/channels/index.ts',
+      'src/modules/index.ts',
+      'container/agent-runner/src/mcp-tools/index.ts',
+      'setup/channels/companions.ts',
+    ]);
+    // The adapter and the guard are SEPARATE fences (idempotency is keyed on a
+    // fence's first line): an install that already has `import './slack.js';`
+    // from the pre-payload skill still gains the guard on a re-run.
+    expect(appends[0].body).toEqual(["import './slack.js';"]);
+    expect(appends[1].body).toEqual(["import './slack-a2a-guard.js';"]);
+    expect(appends[2].body).toEqual([
+      "import './slack-room-membership/index.js';",
+      "import './canvas-actions/index.js';",
+      "import './slack-onboarding/index.js';",
+    ]);
+    expect(appends[3].body).toEqual(["import './canvas.js';"]);
+    // The companion declaration is a direct registration call into the registry
+    // (an appended self-registration IMPORT would evaluate before the registry's
+    // own maps initialize), importing the payload's data module for the list.
+    expect(appends[4].body).toEqual([
+      "import { SLACK_COMPANION_SKILLS } from './slack-companions.js';",
+      "registerCompanionSkills('slack', SLACK_COMPANION_SKILLS);",
+    ]);
   });
 
   it('reads the dependency pinned exactly', () => {
@@ -82,15 +140,17 @@ describe('skill-directives parser, on the converted add-slack', () => {
 
   it('captures prompts into named vars — credentials secret, the mode and handle not', () => {
     const prompts = directives.filter((d) => d.kind === 'prompt');
-    expect(prompts.map(promptVar)).toEqual(['connection', 'bot_token', 'app_token', 'signing_secret', 'owner_handle']);
+    expect(prompts.map(promptVar)).toEqual(['connection', 'bot_token', 'app_token', 'app_token', 'signing_secret', 'owner_handle']);
     expect(prompts[0].args).not.toContain('secret'); // connection — a mode choice, not a secret
     expect(prompts[1].args).toContain('secret'); // bot_token
-    expect(prompts[2].args).toContain('secret'); // app_token
-    expect(prompts[3].args).toContain('secret'); // signing_secret
-    expect(prompts[4].args).not.toContain('secret'); // owner_handle — a plain id, not a secret
+    expect(prompts[2].args).toContain('secret'); // app_token (socket)
+    expect(prompts[3].args).toContain('secret'); // app_token (provisioned twin)
+    expect(prompts[4].args).toContain('secret'); // signing_secret
+    expect(prompts[5].args).not.toContain('secret'); // owner_handle — a plain id, not a secret
     // Each mode's credential is guard-scoped to its branch.
     expect(prompts[2].attrs.when).toBe('connection=socket');
-    expect(prompts[3].attrs.when).toBe('connection=webhook');
+    expect(prompts[3].attrs.when).toBe('connection=provisioned');
+    expect(prompts[4].attrs.when).toBe('connection=webhook');
     // The prompt body is the question; it does not mention env at all.
     expect(prompts[1].body.join(' ')).toMatch(/Bot User OAuth Token/);
   });
@@ -108,10 +168,12 @@ describe('skill-directives parser, on the converted add-slack', () => {
     expect(envSets.map((d) => d.body)).toEqual([
       ['SLACK_BOT_TOKEN={{bot_token}}'],
       ['SLACK_APP_TOKEN={{app_token}}'],
+      ['SLACK_APP_TOKEN={{app_token}}'],
       ['SLACK_SIGNING_SECRET={{signing_secret}}'],
     ]);
     expect(envSets[1].attrs.when).toBe('connection=socket');
-    expect(envSets[2].attrs.when).toBe('connection=webhook');
+    expect(envSets[2].attrs.when).toBe('connection=provisioned');
+    expect(envSets[3].attrs.when).toBe('connection=webhook');
   });
 
   it('passes validation (well-formed, pinned, every {{var}} captured first)', () => {

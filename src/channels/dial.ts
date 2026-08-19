@@ -55,9 +55,12 @@ import { upsertUser } from '../modules/permissions/db/users.js';
  * setup wizard (setup/pair-dial.ts) is the only path that grants owner, after
  * it observes the same consumed pairing. Returns the recorded user id.
  */
-export function recordPairingCandidate(fromNumber: string, at: string = new Date().toISOString()): string {
+export async function recordPairingCandidate(
+  fromNumber: string,
+  at: string = new Date().toISOString(),
+): Promise<string> {
   const userId = `dial:${fromNumber}`;
-  upsertUser({ id: userId, kind: 'dial', display_name: null, created_at: at });
+  await upsertUser({ id: userId, kind: 'dial', display_name: null, created_at: at });
   return userId;
 }
 
@@ -177,7 +180,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
   // event's actual destination (data.to) takes precedence, so the adapter
   // serves every number on the account, not just this one. Resolved lazily via
   // wiredLine() because the group doesn't exist yet when the adapter connects.
-  const line = (): string => wiredLine();
+  const line = (): Promise<string> => wiredLine();
 
   let setup: ChannelSetup | null = null;
   let connected = false;
@@ -198,7 +201,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     // Send from the number the conversation is on (`from`); fall back to the
     // wired line. This is what lets one adapter serve multiple Dial numbers —
     // each reply goes out from the number the person actually texted.
-    const fromNumber = from || wiredLine();
+    const fromNumber = from || (await wiredLine());
     let lastId: string | undefined;
     for (const chunk of body.length <= MAX_CHUNK ? [body] : chunkText(body, MAX_CHUNK)) {
       const sentId = await sendViaCli({
@@ -233,7 +236,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     }
     if (!result.record) return false;
 
-    recordPairingCandidate(fromNumber);
+    await recordPairingCandidate(fromNumber);
     log.info('Dial: pairing code matched, recorded candidate — owner grant deferred to setup', {
       fromNumber,
       promotedToOwner: false,
@@ -255,11 +258,11 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
    * Repairs `is_group` ONLY. `unknown_sender_policy` is operator state — set per
    * line at creation and changeable with `ncl` — so the adapter never writes it.
    */
-  function ensureLinesAreGroups(): void {
+  async function ensureLinesAreGroups(): Promise<void> {
     try {
-      for (const mg of getMessagingGroupsByChannel('dial')) {
+      for (const mg of await getMessagingGroupsByChannel('dial')) {
         if (mg.is_group === 1) continue;
-        updateMessagingGroup(mg.id, { is_group: 1 });
+        await updateMessagingGroup(mg.id, { is_group: 1 });
         log.info('Dial: reconciled line to a group', { platformId: mg.platform_id });
       }
     } catch (err) {
@@ -273,9 +276,9 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
    * necessarily the one setup wired — so prefer the registered group's own
    * platform_id and keep auth only as a pre-registration fallback.
    */
-  function wiredLine(): string {
+  async function wiredLine(): Promise<string> {
     try {
-      const groups = getMessagingGroupsByChannel('dial');
+      const groups = await getMessagingGroupsByChannel('dial');
       if (groups.length === 1) return groups[0].platform_id;
     } catch (err) {
       log.warn('Dial: could not resolve the wired line', { err });
@@ -284,9 +287,9 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
   }
 
   /** The paired operator's E.164, or '' if the install has no Dial owner yet. */
-  function ownerNumber(): string {
+  async function ownerNumber(): Promise<string> {
     try {
-      const owner = getOwners().find((r) => r.user_id.startsWith('dial:'));
+      const owner = (await getOwners()).find((r) => r.user_id.startsWith('dial:'));
       return owner ? owner.user_id.slice('dial:'.length) : '';
     } catch (err) {
       log.warn('Dial: could not resolve the paired owner', { err });
@@ -313,7 +316,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       text = typeof data.body === 'string' ? data.body : '';
       // Pairing codes are consumed before any agent sees them. Confirm from the
       // number the code was sent to (falls back to the account default).
-      if (peer && (await consumePairing(peer, text, eventLine || line()))) return;
+      if (peer && (await consumePairing(peer, text, eventLine || (await line())))) return;
     } else if (env.type === 'call.ended') {
       const outbound = data.direction === 'outbound';
       const mine = outbound ? data.from : data.to;
@@ -323,7 +326,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       if (outbound) {
         // The outcome belongs to the operator who asked for the call, not to
         // the person we dialled.
-        peer = ownerNumber();
+        peer = await ownerNumber();
         if (!peer) {
           log.warn('Dial: outbound call ended but no paired owner to notify — dropping event', { callee });
           return;
@@ -349,10 +352,10 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     // (public) wiring. `eventLine` is the number this event hit; fall back to the
     // account default when the event omits it (keeps single-number installs
     // unchanged).
-    const activeLine = eventLine || line();
+    const activeLine = eventLine || (await line());
     const platformId = activeLine || peer;
     const threadId = activeLine ? peer : null;
-    ensureLinesAreGroups();
+    await ensureLinesAreGroups();
     const msg: InboundMessage = {
       id: id ?? peer,
       kind: 'chat',
@@ -476,7 +479,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
 
     async setup(cfg: ChannelSetup): Promise<void> {
       setup = cfg;
-      ensureLinesAreGroups();
+      await ensureLinesAreGroups();
       fs.mkdirSync(spoolDir, { recursive: true });
       const commandTarget = ensureCommandTarget() ? 'ok' : 'unverified';
 

@@ -13,29 +13,29 @@ import { getOwners, getUserRoles, hasAnyOwner } from '../modules/permissions/db/
 import { getUser } from '../modules/permissions/db/users.js';
 import { recordPairingCandidate } from './dial.js';
 
-beforeEach(() => {
-  const db = initTestDb();
-  runMigrations(db);
+beforeEach(async () => {
+  const db = await initTestDb();
+  await runMigrations(db);
 });
 
-afterEach(() => {
-  closeDb();
+afterEach(async () => {
+  await closeDb();
 });
 
 describe('dial adapter pairing — records candidate, grants no role', () => {
-  it('records the sender as a user but grants no role, even with no existing owner', () => {
-    expect(hasAnyOwner()).toBe(false);
+  it('records the sender as a user but grants no role, even with no existing owner', async () => {
+    expect(await hasAnyOwner()).toBe(false);
 
-    const userId = recordPairingCandidate('+15551234567');
+    const userId = await recordPairingCandidate('+15551234567');
     expect(userId).toBe('dial:+15551234567');
 
     // Recorded as a user so the wizard can see who paired...
-    expect(getUser(userId)?.kind).toBe('dial');
+    expect((await getUser(userId))?.kind).toBe('dial');
 
     // ...but with NO role, and the install still has no owner — the adapter
     // never promotes.
-    expect(getUserRoles(userId)).toHaveLength(0);
-    expect(getOwners()).toHaveLength(0);
-    expect(hasAnyOwner()).toBe(false);
+    expect(await getUserRoles(userId)).toHaveLength(0);
+    expect(await getOwners()).toHaveLength(0);
+    expect(await hasAnyOwner()).toBe(false);
   });
 });

@@ -54,6 +54,19 @@ export interface ProvisionInput {
    * default variant — a one-way door decided at provision time.
    */
   allowGuests?: boolean;
+  /**
+   * Fleet-analytics attribution, all optional — sent on the broker's
+   * POST /v1/apps body only when defined (requested_by / parent_app_id /
+   * template on the wire; a broker that predates them ignores unknown body
+   * fields). client_version is derived from rootDir's package.json inside
+   * provisionSlackApp, not supplied here.
+   */
+  /** Slack user id (U…/W…) of the human who asked for this agent. */
+  requestedBy?: string;
+  /** The creating agent's own Slack app id (A…) when an agent created this one. */
+  parentAppId?: string;
+  /** Template name, when the agent was stamped from one. */
+  template?: string;
 }
 
 export interface ProvisionResult {

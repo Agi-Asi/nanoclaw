@@ -464,21 +464,16 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
         log.warn('Dial: no reply recipient (no thread) — dropping outbound', { platformId, threadId });
         return undefined;
       }
-      // Throw on a failed send. `undefined` means "delivered, no platform id"
-      // in the adapter contract, so swallowing the error here would have
-      // delivery.ts mark the message delivered and clear the outbox — a silent
-      // loss. Throwing puts Dial on the bounded retry path (3 attempts, then
-      // markDeliveryFailed).
+      // Let a failed send throw. `undefined` means "delivered, no platform id"
+      // in the adapter contract, so catching here would have delivery.ts mark
+      // the message delivered and clear the outbox — a silent loss. Throwing
+      // puts Dial on the bounded retry path (3 attempts, then
+      // markDeliveryFailed), which logs the failure.
       //
       // Deliberate trade-off: sendSms chunks long bodies, so if chunk 1 sends
       // and chunk 2 throws, the retry resends chunk 1 and a long message can
       // arrive twice. A duplicate SMS is preferable to a silently dropped one.
-      try {
-        return await sendSms(recipient, text, platformId);
-      } catch (err) {
-        log.warn('Dial: send failed, leaving it to the delivery retry path', { recipient, err });
-        throw err;
-      }
+      return await sendSms(recipient, text, platformId);
     },
   };
 

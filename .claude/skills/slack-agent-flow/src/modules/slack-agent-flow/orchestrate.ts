@@ -438,11 +438,6 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
   const originAuth = await slackAuthTest(originBotToken, 'origin-auth');
   const originBotUserId = originAuth.userId;
 
-  // S3/S4 provision + .env persist (reuse path: tokens already in .env, no network).
-  // requestedBy: the S1 operator is the requesting human — the only Slack
-  // member id in scope. The origin app's own A… id is NOT in scope (auth.test
-  // carries no app id and .env persists tokens only) and the flow has no
-  // template concept, so parentAppId / template are not sent from this path.
   const app = await provisionSlackApp({
     slug,
     displayName,

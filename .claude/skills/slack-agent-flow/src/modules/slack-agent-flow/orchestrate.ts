@@ -442,7 +442,6 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
   const originAuth = await slackAuthTest(originBotToken, 'origin-auth');
   const originBotUserId = originAuth.userId;
 
-  // S3/S4 provision + .env persist (reuse path: tokens already in .env, no network).
   const app = await provisionSlackApp({
     slug,
     displayName,
@@ -450,6 +449,7 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
     teamId: originAuth.teamId,
     description: args.description,
     allowGuests: args.allowGuests,
+    requestedBy: operatorUserId,
   });
 
   // S5 adapter-start. The multi-instance module must be installed regardless

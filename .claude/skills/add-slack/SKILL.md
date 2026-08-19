@@ -33,16 +33,17 @@ src/channels/slack-instances-registration.test.ts
 src/provisioning/slack-app.ts
 src/provisioning/slack-app.test.ts
 container/skills/slack-formatting/SKILL.md
-container/skills/welcome/addenda/slack.md
 ```
 
 - **Adapter + shared lib** (`slack.ts`, `slack-lib.ts`): bridge registration, wiring defaults, conversation resolver, the native `SLACK_INSTANCES` loop — pinned by the two registration tests.
 - **Bot-inbound guard** (`slack-a2a-guard.ts`): drops bot-authored inbound at the bridge by default; feature skills register a narrower admission policy on its seam.
 - **Provisioning core** (`src/provisioning/slack-app.ts`): manifest template, scope/event constants, and the broker + manager-token transports for creating a Slack app programmatically. Nothing on the adapter path imports it — the setup wizard's auto-provision pre-step and feature skills do.
-- **Container skills**: `slack-formatting/` (mrkdwn syntax; synced to `~/.claude/skills`), `welcome/addenda/slack.md` (channel-matched welcome addendum — inert on hosts predating the mechanism).
+- **Container skills**: `slack-formatting/` (mrkdwn syntax; synced to `~/.claude/skills`).
 
-The room/canvas/onboarding host modules and their container files are part of
-the agents feature and install with `/slack-agent-flow`, not here.
+The room/canvas/onboarding host modules, their container files, and the Slack
+welcome-tour addendum (it describes rooms, canvases, and the agents access
+model) are part of the agents feature and install with `/slack-agent-flow`,
+not here.
 
 ### 2. Register the payload
 
@@ -79,12 +80,14 @@ pnpm exec vitest run src/channels/slack-registration.test.ts src/channels/slack-
 Socket Mode (an outbound WebSocket — no public URL, the right default behind NAT)
 vs webhook delivery (needs a public HTTPS Request URL); the adapter picks Socket
 Mode automatically whenever `SLACK_APP_TOKEN` is set.
-```nc:prompt connection validate:^(socket|webhook|provisioned)$
+```nc:prompt connection validate:^(socket|webhook|provisioned)$ choices:socket|webhook
 How should Slack deliver events? `socket` (Socket Mode — no public URL, recommended for local or behind-NAT installs) or `webhook` (needs a public HTTPS Request URL).
 ```
 
-`provisioned` is never offered interactively — it arrives only via pre-bound `inputs`
-(a programmatically created app) and behaves like Socket Mode minus the walkthrough below.
+`provisioned` is never offered interactively (`choices:` limits the select;
+`validate:` stays wider because pre-bound inputs may exceed the offered set) —
+it arrives only via pre-bound `inputs` (a programmatically created app) and
+behaves like Socket Mode minus the walkthrough below.
 
 For Socket Mode, tell the user:
 ```nc:operator when:connection=socket

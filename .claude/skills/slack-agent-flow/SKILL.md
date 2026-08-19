@@ -64,8 +64,13 @@ NanoClaw trunk is too old for this skill — bring the install up to date
 (`/update-nanoclaw`) instead of patching any of these files by hand:
 
 ```nc:run effect:check
-grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/claude-md-compose.ts
+grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/claude-md-compose.ts && grep -q "await action.decide" src/guard/guard.ts
 ```
+
+The last term requires an async-capable guard seam: the flow's `create_agent`
+and room-action guards read container config asynchronously, and on a trunk
+whose `guard()` does not await `decide` a returned Promise would be treated
+as an allow — the check turns that silent fail-open into a fail-fast here.
 
 ### 3. Copy the shared feature payload from the channels branch
 
@@ -98,7 +103,12 @@ container/agent-runner/src/mcp-tools/canvas.test.ts
 container/skills/slack-construct/SKILL.md
 container/skills/slack-construct/instructions.md
 container/skills/canvas-work/SKILL.md
+container/skills/welcome/addenda/slack.md
 ```
+
+The welcome addendum rides with the agents feature deliberately: its tour
+content describes rooms, canvases, suggested-prompt DMs, and the agents
+access model — none of which exist on a base `/add-slack` install.
 
 Register the three host modules in the modules barrel and the canvas tool in
 the container tool barrel (each append is skipped if already present; these
@@ -198,7 +208,7 @@ pnpm exec vitest run src/modules/slack-agent-flow src/modules/slack-room-members
 ```
 
 ```nc:run effect:test
-cd container/agent-runner && bun test src/mcp-tools/rooms.test.ts
+cd container/agent-runner && bun test src/mcp-tools/rooms.test.ts src/mcp-tools/canvas.test.ts
 ```
 
 ### 9. Restart the host

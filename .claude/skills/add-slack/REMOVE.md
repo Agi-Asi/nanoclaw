@@ -16,8 +16,7 @@ rm -f src/channels/slack.ts src/channels/slack-lib.ts src/channels/slack-lib.tes
   src/channels/slack-registration.test.ts \
   src/channels/slack-instances-registration.test.ts \
   src/provisioning/slack-app.ts src/provisioning/slack-app.test.ts \
-  container/skills/slack-formatting/SKILL.md \
-  container/skills/welcome/addenda/slack.md
+  container/skills/slack-formatting/SKILL.md
 ```
 
 ## 3. Remove credentials
@@ -36,8 +35,9 @@ pnpm uninstall @chat-adapter/slack
 
 ## 5. Feature skills
 
-If the agents feature was applied on top, remove those skills first (each has
-its own REMOVE.md): `slack-agent-flow`, then `slack-a2a-rooms`.
+If the agents feature was applied on top, remove those skills first:
+`slack-agent-flow` (its REMOVE.md), then `slack-a2a-rooms` (removal steps in
+its SKILL.md).
 
 ## 6. Rebuild and restart
 

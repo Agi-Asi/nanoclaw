@@ -29,7 +29,8 @@ a provisioned bot, follow the slack-managed-agents skill's teardown section.
          container/agent-runner/src/mcp-tools/canvas.test.ts
    rm -rf container/skills/slack-construct-agents container/skills/slack-construct \
           container/skills/canvas-work
-   rm -f container/skills/welcome/addenda/teams-tour.md
+   rm -f container/skills/welcome/addenda/teams-tour.md \
+         container/skills/welcome/addenda/slack.md
    ```
 
 3. Rebuild and restart:

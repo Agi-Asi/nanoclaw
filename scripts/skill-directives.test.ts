@@ -68,7 +68,6 @@ describe('skill-directives parser, on the converted add-slack', () => {
       'src/provisioning/slack-app.ts',
       'src/provisioning/slack-app.test.ts',
       'container/skills/slack-formatting/SKILL.md',
-      'container/skills/welcome/addenda/slack.md',
     ]);
   });
 
@@ -107,6 +106,9 @@ describe('skill-directives parser, on the converted add-slack', () => {
     const prompts = directives.filter((d) => d.kind === 'prompt');
     expect(prompts.map(promptVar)).toEqual(['connection', 'bot_token', 'app_token', 'app_token', 'signing_secret', 'owner_handle']);
     expect(prompts[0].args).not.toContain('secret'); // connection — a mode choice, not a secret
+    // The interactive select offers two modes; validate stays wider because
+    // `provisioned` arrives only via pre-bound inputs (the --slack-agents pre-step).
+    expect(prompts[0].attrs.choices).toBe('socket|webhook');
     expect(prompts[1].args).toContain('secret'); // bot_token
     expect(prompts[2].args).toContain('secret'); // app_token (socket)
     expect(prompts[3].args).toContain('secret'); // app_token (provisioned twin)

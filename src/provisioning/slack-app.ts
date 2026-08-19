@@ -273,7 +273,7 @@ function defaultConfigDir(): string {
 }
 
 /**
- * The managed-Slack service belonging to a given account service.
+ * The Slack-side service belonging to a given account service.
  *
  * The two are halves of one deployment: this service authenticates the
  * install token that service minted, so a token from one is not a credential

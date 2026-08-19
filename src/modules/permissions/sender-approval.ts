@@ -265,8 +265,7 @@ export async function declineAndNotify(input: DeclineAndNotifyInput): Promise<vo
   // a per-agent bot identity registered as its own adapter instance
   // answers as itself.
   const owner = ownerDisplayName();
-  const declineText =
-    input.declineText ?? `I'm ${owner ?? 'my owner'}'s personal agent — I can't help you directly.`;
+  const declineText = input.declineText ?? `I'm ${owner ?? 'my owner'}'s personal agent — I can't help you directly.`;
   try {
     await adapter.deliver(
       event.channelType,

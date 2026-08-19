@@ -232,7 +232,7 @@ function assertNoTokenLeak(): void {
   }
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
   fakeDeps.SLACK_DEFAULTS = TEST_SLACK_DEFAULTS;
   fakeDeps.startChannelAdapter.mockResolvedValue('started');
@@ -255,16 +255,22 @@ beforeEach(() => {
   fs.writeFileSync(path.join(tmpDir, '.env'), `SLACK_BOT_TOKEN=${ORIGIN_BOT_TOKEN}\n`);
   process.env.NANOCLAW_REGISTRY_TOKEN = REGISTRY_TOKEN; // broker mode, no account.json / .env lookup
 
-  const db = initTestDb();
-  runMigrations(db);
+  const db = await initTestDb();
+  await runMigrations(db);
 
   const now = new Date().toISOString();
-  createAgentGroup({ id: SRC_GROUP, name: 'Andy', folder: 'andy', agent_provider: null, created_at: now });
-  ensureContainerConfig(SRC_GROUP);
-  updateContainerConfigScalars(SRC_GROUP, { cli_scope: 'global' }); // guard allows without a hold
-  upsertUser({ id: 'slack:U0OPERATOR', kind: 'slack', display_name: 'Op', created_at: now });
-  grantRole({ user_id: 'slack:U0OPERATOR', role: 'owner', agent_group_id: null, granted_by: null, granted_at: now });
-  createMessagingGroup({
+  await createAgentGroup({ id: SRC_GROUP, name: 'Andy', folder: 'andy', agent_provider: null, created_at: now });
+  await ensureContainerConfig(SRC_GROUP);
+  await updateContainerConfigScalars(SRC_GROUP, { cli_scope: 'global' }); // guard allows without a hold
+  await upsertUser({ id: 'slack:U0OPERATOR', kind: 'slack', display_name: 'Op', created_at: now });
+  await grantRole({
+    user_id: 'slack:U0OPERATOR',
+    role: 'owner',
+    agent_group_id: null,
+    granted_by: null,
+    granted_at: now,
+  });
+  await createMessagingGroup({
     id: 'mg-origin',
     channel_type: 'slack',
     platform_id: 'slack:D0OPDM',
@@ -273,18 +279,18 @@ beforeEach(() => {
     unknown_sender_policy: 'strict',
     created_at: now,
   });
-  createSession(SLACK_SESSION);
+  await createSession(SLACK_SESSION);
   // Declared platform defaults so resolveWiringDefaults / validate see slack's
   // real shape (group: mention-sticky + threads) for the dead named instance.
   registerChannelAdapter('slack', { factory: () => null, defaults: TEST_SLACK_DEFAULTS });
 });
 
-afterEach(() => {
+afterEach(async () => {
   process.chdir(originalCwd);
   delete process.env.NANOCLAW_REGISTRY_TOKEN;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
-  closeDb();
+  await closeDb();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -293,12 +299,15 @@ describe('slack-aware create_agent — happy path (Slack-origin session)', () =>
     await runCreateAgent({ name: 'Research', instructions: 'dig deep' });
 
     // Upstream leg: group + scaffold + bidirectional a2a destinations.
-    const newGroup = getAgentGroupByFolder('research');
+    const newGroup = await getAgentGroupByFolder('research');
     expect(newGroup).toBeDefined();
     expect(mockInitGroupFilesystem).toHaveBeenCalledTimes(1);
-    const dest = getDestinationByName(SRC_GROUP, 'research');
+    const dest = await getDestinationByName(SRC_GROUP, 'research');
     expect(dest).toMatchObject({ target_type: 'agent', target_id: newGroup!.id });
-    expect(getDestinationByName(newGroup!.id, 'parent')).toMatchObject({ target_type: 'agent', target_id: SRC_GROUP });
+    expect(await getDestinationByName(newGroup!.id, 'parent')).toMatchObject({
+      target_type: 'agent',
+      target_id: SRC_GROUP,
+    });
 
     // Env keys (values themselves never asserted into messages/logs).
     const env = fs.readFileSync(path.join(tmpDir, '.env'), 'utf-8');
@@ -317,9 +326,9 @@ describe('slack-aware create_agent — happy path (Slack-origin session)', () =>
     // DM row + wiring on the NEW instance. Agent-view is the default variant
     // so the DM gets thread-per-conversation sessions:
     // session_mode 'per-thread' + explicit threads:1.
-    const dmMg = getMessagingGroupByPlatform('slack', 'slack:D0NEWDM', 'slack-research');
+    const dmMg = await getMessagingGroupByPlatform('slack', 'slack:D0NEWDM', 'slack-research');
     expect(dmMg).toMatchObject({ is_group: 0, unknown_sender_policy: 'strict', name: 'Research DM' });
-    expect(getMessagingGroupAgentByPair(dmMg!.id, newGroup!.id)).toMatchObject({
+    expect(await getMessagingGroupAgentByPair(dmMg!.id, newGroup!.id)).toMatchObject({
       engage_mode: 'pattern',
       engage_pattern: '.',
       sender_scope: 'all',
@@ -331,16 +340,16 @@ describe('slack-aware create_agent — happy path (Slack-origin session)', () =>
 
     // Room: one row PER instance, policy 'public', mention/accumulate wirings
     // (D4 — flow-created rooms only; mention-sticky is gone from the flow).
-    const roomOrigin = getMessagingGroupByPlatform('slack', 'slack:G0ROOM', 'slack');
-    const roomNew = getMessagingGroupByPlatform('slack', 'slack:G0ROOM', 'slack-research');
+    const roomOrigin = await getMessagingGroupByPlatform('slack', 'slack:G0ROOM', 'slack');
+    const roomNew = await getMessagingGroupByPlatform('slack', 'slack:G0ROOM', 'slack-research');
     expect(roomOrigin).toMatchObject({ is_group: 1, unknown_sender_policy: 'public' });
     expect(roomNew).toMatchObject({ is_group: 1, unknown_sender_policy: 'public' });
-    expect(getMessagingGroupAgentByPair(roomOrigin!.id, SRC_GROUP)).toMatchObject({
+    expect(await getMessagingGroupAgentByPair(roomOrigin!.id, SRC_GROUP)).toMatchObject({
       engage_mode: 'mention',
       engage_pattern: null,
       ignored_message_policy: 'accumulate',
     });
-    expect(getMessagingGroupAgentByPair(roomNew!.id, newGroup!.id)).toMatchObject({
+    expect(await getMessagingGroupAgentByPair(roomNew!.id, newGroup!.id)).toMatchObject({
       engage_mode: 'mention',
       engage_pattern: null,
       ignored_message_policy: 'accumulate',
@@ -405,9 +414,9 @@ describe('slack-aware create_agent — manifest variants', () => {
     const appBody = JSON.parse(fetchCalls.find((c) => c.url.endsWith('/v1/apps'))!.body) as Record<string, unknown>;
     expect(appBody.allow_guests).toBe(true);
 
-    const newGroup = getAgentGroupByFolder('guesty');
-    const dmMg = getMessagingGroupByPlatform('slack', 'slack:D0NEWDM', 'slack-guesty');
-    const dmWiring = getMessagingGroupAgentByPair(dmMg!.id, newGroup!.id)!;
+    const newGroup = await getAgentGroupByFolder('guesty');
+    const dmMg = await getMessagingGroupByPlatform('slack', 'slack:D0NEWDM', 'slack-guesty');
+    const dmWiring = (await getMessagingGroupAgentByPair(dmMg!.id, newGroup!.id))!;
     expect(dmWiring).toMatchObject({ session_mode: 'shared' });
     expect(dmWiring.threads ?? null).toBeNull();
   });
@@ -425,13 +434,13 @@ describe("slack-aware create_agent — room:'none'", () => {
 
     await runCreateAgent({ name: 'Research', instructions: 'dig deep', room: 'none' });
 
-    expect(getAgentGroupByFolder('research')).toBeDefined();
+    expect(await getAgentGroupByFolder('research')).toBeDefined();
     // Only the operator-DM conversations.open — no MPIM.
     const opens = fetchCalls.filter((c) => c.url.includes('conversations.open'));
     expect(opens).toHaveLength(1);
     expect(JSON.parse(opens[0]!.body)).toMatchObject({ users: 'U0OPERATOR' });
     // No room rows on any instance, no a2a allowlist, no canvas, no shadow wiring.
-    expect(getAllMessagingGroups().filter((m) => m.platform_id === 'slack:G0ROOM')).toHaveLength(0);
+    expect((await getAllMessagingGroups()).filter((m) => m.platform_id === 'slack:G0ROOM')).toHaveLength(0);
     expect(fs.readFileSync(path.join(tmpDir, '.env'), 'utf-8')).not.toContain('SLACK_A2A_ROOMS');
     expect(mockCreateRoomCanvas).not.toHaveBeenCalled();
     expect(mockWireCanvasComments).not.toHaveBeenCalled();
@@ -450,12 +459,12 @@ describe("slack-aware create_agent — room:'none'", () => {
   });
 
   it("hold payload carries room:'none' through to the approved replay (confined group)", async () => {
-    updateContainerConfigScalars(SRC_GROUP, { cli_scope: 'group' });
+    await updateContainerConfigScalars(SRC_GROUP, { cli_scope: 'group' });
 
     await runCreateAgent({ name: 'Research', instructions: 'dig deep', room: 'none' });
 
     // Held — nothing created yet; the replay payload must preserve room:'none'.
-    expect(getAgentGroupByFolder('research')).toBeUndefined();
+    expect(await getAgentGroupByFolder('research')).toBeUndefined();
     expect(mockRequestApproval).toHaveBeenCalledTimes(1);
     const opts = mockRequestApproval.mock.calls[0]![0] as { action: string; payload: Record<string, unknown> };
     expect(opts.action).toBe('create_agent');
@@ -479,7 +488,7 @@ describe('slack-aware create_agent — room canvas contract', () => {
     });
     // Shadow-channel wiring rides on canvas success: EVERY participant —
     // creator identified separately from the full list.
-    const newGroup = getAgentGroupByFolder('research')!;
+    const newGroup = (await getAgentGroupByFolder('research'))!;
     expect(mockWireCanvasComments).toHaveBeenCalledTimes(1);
     expect(mockWireCanvasComments).toHaveBeenCalledWith(
       'F0CANVAS',
@@ -501,8 +510,8 @@ describe('slack-aware create_agent — room canvas contract', () => {
 describe('ensureAgentRoom — N-bot rooms', () => {
   it('opens the MPIM with every participating bot, wires each instance, and makes destinations pairwise', async () => {
     const now = new Date().toISOString();
-    createAgentGroup({ id: 'ag-new', name: 'Pixel', folder: 'pixel', agent_provider: null, created_at: now });
-    createAgentGroup({ id: 'ag-third', name: 'Devin', folder: 'devin', agent_provider: null, created_at: now });
+    await createAgentGroup({ id: 'ag-new', name: 'Pixel', folder: 'pixel', agent_provider: null, created_at: now });
+    await createAgentGroup({ id: 'ag-third', name: 'Devin', folder: 'devin', agent_provider: null, created_at: now });
     const participants = [
       { instanceKey: 'slack', botUserId: 'U0ORIGINBOT', agentGroupId: SRC_GROUP, agentGroupName: 'Andy' },
       { instanceKey: 'slack-devin', botUserId: 'U0THIRD', agentGroupId: 'ag-third', agentGroupName: 'Devin' },
@@ -527,9 +536,9 @@ describe('ensureAgentRoom — N-bot rooms', () => {
 
     // One mg row + mention/accumulate wiring PER participating instance.
     for (const p of participants) {
-      const mg = getMessagingGroupByPlatform('slack', 'slack:G0ROOM', p.instanceKey);
+      const mg = await getMessagingGroupByPlatform('slack', 'slack:G0ROOM', p.instanceKey);
       expect(mg).toMatchObject({ is_group: 1, unknown_sender_policy: 'public', name: 'Pixel room' });
-      expect(getMessagingGroupAgentByPair(mg!.id, p.agentGroupId)).toMatchObject({
+      expect(await getMessagingGroupAgentByPair(mg!.id, p.agentGroupId)).toMatchObject({
         engage_mode: 'mention',
         engage_pattern: null,
         ignored_message_policy: 'accumulate',
@@ -537,12 +546,30 @@ describe('ensureAgentRoom — N-bot rooms', () => {
     }
 
     // Destinations symmetry: every distinct agent-group pair, both directions.
-    expect(getDestinationByName(SRC_GROUP, 'devin')).toMatchObject({ target_type: 'agent', target_id: 'ag-third' });
-    expect(getDestinationByName(SRC_GROUP, 'pixel')).toMatchObject({ target_type: 'agent', target_id: 'ag-new' });
-    expect(getDestinationByName('ag-third', 'andy')).toMatchObject({ target_type: 'agent', target_id: SRC_GROUP });
-    expect(getDestinationByName('ag-third', 'pixel')).toMatchObject({ target_type: 'agent', target_id: 'ag-new' });
-    expect(getDestinationByName('ag-new', 'andy')).toMatchObject({ target_type: 'agent', target_id: SRC_GROUP });
-    expect(getDestinationByName('ag-new', 'devin')).toMatchObject({ target_type: 'agent', target_id: 'ag-third' });
+    expect(await getDestinationByName(SRC_GROUP, 'devin')).toMatchObject({
+      target_type: 'agent',
+      target_id: 'ag-third',
+    });
+    expect(await getDestinationByName(SRC_GROUP, 'pixel')).toMatchObject({
+      target_type: 'agent',
+      target_id: 'ag-new',
+    });
+    expect(await getDestinationByName('ag-third', 'andy')).toMatchObject({
+      target_type: 'agent',
+      target_id: SRC_GROUP,
+    });
+    expect(await getDestinationByName('ag-third', 'pixel')).toMatchObject({
+      target_type: 'agent',
+      target_id: 'ag-new',
+    });
+    expect(await getDestinationByName('ag-new', 'andy')).toMatchObject({
+      target_type: 'agent',
+      target_id: SRC_GROUP,
+    });
+    expect(await getDestinationByName('ag-new', 'devin')).toMatchObject({
+      target_type: 'agent',
+      target_id: 'ag-third',
+    });
 
     // Allowlisted for a2a. No room-contract post: ensureAgentRoom
     // itself posts nothing — the origin agent authors the intro, and
@@ -561,7 +588,7 @@ describe('ensureAgentRoom — N-bot rooms', () => {
 
   it('is idempotent: a second call creates nothing new and grows no second canvas', async () => {
     const now = new Date().toISOString();
-    createAgentGroup({ id: 'ag-new', name: 'Pixel', folder: 'pixel', agent_provider: null, created_at: now });
+    await createAgentGroup({ id: 'ag-new', name: 'Pixel', folder: 'pixel', agent_provider: null, created_at: now });
     const participants = [
       { instanceKey: 'slack', botUserId: 'U0ORIGINBOT', agentGroupId: SRC_GROUP, agentGroupName: 'Andy' },
       { instanceKey: 'slack-pixel', botUserId: 'U0NEWBOT', agentGroupId: 'ag-new', agentGroupName: 'Pixel' },
@@ -576,11 +603,11 @@ describe('ensureAgentRoom — N-bot rooms', () => {
     };
 
     await ensureAgentRoom(args);
-    const mgCountAfterFirst = getAllMessagingGroups().length;
+    const mgCountAfterFirst = (await getAllMessagingGroups()).length;
 
     const second = await ensureAgentRoom(args);
     expect(second).toMatchObject({ roomChannelId: 'G0ROOM', created: false });
-    expect(getAllMessagingGroups().length).toBe(mgCountAfterFirst);
+    expect((await getAllMessagingGroups()).length).toBe(mgCountAfterFirst);
     expect(fetchCalls.filter((c) => c.url.includes('chat.postMessage'))).toHaveLength(0);
     expect(mockCreateRoomCanvas).toHaveBeenCalledTimes(1);
   });
@@ -588,7 +615,7 @@ describe('ensureAgentRoom — N-bot rooms', () => {
 
 describe('slack-aware create_agent — non-Slack parity', () => {
   it('non-slack session: behaves exactly as upstream, zero Slack side effects', async () => {
-    createMessagingGroup({
+    await createMessagingGroup({
       id: 'mg-tg',
       channel_type: 'telegram',
       platform_id: 'tg:123',
@@ -598,26 +625,26 @@ describe('slack-aware create_agent — non-Slack parity', () => {
       created_at: new Date().toISOString(),
     });
     const tgSession: Session = { ...SLACK_SESSION, id: 'sess-tg', messaging_group_id: 'mg-tg' };
-    createSession(tgSession);
+    await createSession(tgSession);
     const envBefore = fs.readFileSync(path.join(tmpDir, '.env'), 'utf-8');
-    const mgCountBefore = getAllMessagingGroups().length;
+    const mgCountBefore = (await getAllMessagingGroups()).length;
 
     await runCreateAgent({ name: 'Helper' }, tgSession);
 
-    expect(getAgentGroupByFolder('helper')).toBeDefined(); // upstream leg ran
+    expect(await getAgentGroupByFolder('helper')).toBeDefined(); // upstream leg ran
     expect(fetchCalls).toHaveLength(0);
     expect(fakeDeps.startChannelAdapter).not.toHaveBeenCalled();
     expect(fs.readFileSync(path.join(tmpDir, '.env'), 'utf-8')).toBe(envBefore);
-    expect(getAllMessagingGroups().length).toBe(mgCountBefore);
+    expect((await getAllMessagingGroups()).length).toBe(mgCountBefore);
   });
 
   it('null messaging_group_id (task/a2a session): skips the Slack leg', async () => {
     const bareSession: Session = { ...SLACK_SESSION, id: 'sess-bare', messaging_group_id: null };
-    createSession(bareSession);
+    await createSession(bareSession);
 
     await runCreateAgent({ name: 'Helper' }, bareSession);
 
-    expect(getAgentGroupByFolder('helper')).toBeDefined();
+    expect(await getAgentGroupByFolder('helper')).toBeDefined();
     expect(fetchCalls).toHaveLength(0);
     expect(fakeDeps.startChannelAdapter).not.toHaveBeenCalled();
   });
@@ -629,7 +656,7 @@ describe('slack-aware create_agent — failure and retry', () => {
 
     await runCreateAgent({ name: 'Research' });
 
-    const newGroup = getAgentGroupByFolder('research');
+    const newGroup = await getAgentGroupByFolder('research');
     expect(newGroup).toBeDefined();
     expect(fetchCalls.filter((c) => c.url.includes('chat.postMessage'))).toHaveLength(0);
 
@@ -647,12 +674,12 @@ describe('slack-aware create_agent — failure and retry', () => {
   it('double invocation: upstream collision short-circuits — no duplicate rows, apps, posts, or nudges', async () => {
     await runCreateAgent({ name: 'Research' });
     const fetchCountAfterFirst = fetchCalls.length;
-    const mgCountAfterFirst = getAllMessagingGroups().length;
+    const mgCountAfterFirst = (await getAllMessagingGroups()).length;
 
     await runCreateAgent({ name: 'Research' });
 
     expect(fetchCalls.length).toBe(fetchCountAfterFirst);
-    expect(getAllMessagingGroups().length).toBe(mgCountAfterFirst);
+    expect((await getAllMessagingGroups()).length).toBe(mgCountAfterFirst);
     expect(fetchCalls.filter((c) => c.url.endsWith('/v1/apps'))).toHaveLength(1);
     expect(fetchCalls.filter((c) => c.url.includes('chat.postMessage'))).toHaveLength(1);
     expect(notifyTexts().filter((t) => t.includes('introduction'))).toHaveLength(1);
@@ -662,7 +689,7 @@ describe('slack-aware create_agent — failure and retry', () => {
   it('finish-path retry after success: rows exist, so no second canvas, no posts, no intro nudge', async () => {
     mockCreateRoomCanvas.mockResolvedValue('F0CANVAS');
     await runCreateAgent({ name: 'Research' });
-    const newGroup = getAgentGroupByFolder('research')!;
+    const newGroup = (await getAgentGroupByFolder('research'))!;
     const postCountAfterFirst = fetchCalls.filter((c) => c.url.includes('chat.postMessage')).length;
     const notifyCountAfterFirst = mockNotifyWrite.mock.calls.length;
 
@@ -681,9 +708,9 @@ describe('slack-aware create_agent — failure and retry', () => {
     // same starting state as the "broker failure" case above.
     brokerStatus = 500;
     await runCreateAgent({ name: 'Research' });
-    const newGroup = getAgentGroupByFolder('research')!;
+    const newGroup = (await getAgentGroupByFolder('research'))!;
     brokerStatus = 200; // retry succeeds at the broker step this time
-    const mgCountBefore = getAllMessagingGroups().length;
+    const mgCountBefore = (await getAllMessagingGroups()).length;
 
     mockAssertSlackInstancesModuleInstalled.mockRejectedValueOnce(
       new SlackFlowError(
@@ -698,6 +725,6 @@ describe('slack-aware create_agent — failure and retry', () => {
 
     // S6-S8 must not have run: no DM messaging group got wired for an
     // instance the runtime still can't start.
-    expect(getAllMessagingGroups().length).toBe(mgCountBefore);
+    expect((await getAllMessagingGroups()).length).toBe(mgCountBefore);
   });
 });

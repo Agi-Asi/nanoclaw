@@ -204,12 +204,12 @@ function generateId(prefix: string): string {
  * createRoomCanvas, a failure here must never fail room creation. Returns the
  * shadow channel id, or undefined on invalid canvas-id shape or any error.
  */
-export function wireCanvasComments(
+export async function wireCanvasComments(
   canvasId: string,
   creator: CanvasCommentsParticipant,
   participants: CanvasCommentsParticipant[],
   roomName: string,
-): string | undefined {
+): Promise<string | undefined> {
   try {
     const shadowChannelId = deriveCanvasShadowChannelId(canvasId);
     if (!shadowChannelId) {
@@ -224,7 +224,7 @@ export function wireCanvasComments(
     const everyone = [creator, ...participants.filter((p) => !isCreator(p))];
 
     for (const p of everyone) {
-      let mg = getMessagingGroupByPlatform('slack', platformId, p.instanceKey);
+      let mg = await getMessagingGroupByPlatform('slack', platformId, p.instanceKey);
       if (!mg) {
         const row: MessagingGroup = {
           id: generateId('mg'),
@@ -236,13 +236,13 @@ export function wireCanvasComments(
           unknown_sender_policy: 'public',
           created_at: new Date().toISOString(),
         };
-        createMessagingGroup(row);
+        await createMessagingGroup(row);
         mg = row;
       }
 
-      if (!getMessagingGroupAgentByPair(mg.id, p.agentGroupId)) {
+      if (!(await getMessagingGroupAgentByPair(mg.id, p.agentGroupId))) {
         const creatorRow = isCreator(p);
-        createMessagingGroupAgent({
+        await createMessagingGroupAgent({
           id: generateId('mga'),
           messaging_group_id: mg.id,
           agent_group_id: p.agentGroupId,

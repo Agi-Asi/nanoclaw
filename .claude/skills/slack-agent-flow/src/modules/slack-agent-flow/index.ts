@@ -45,9 +45,9 @@ import { prefetchAvatar, resolveProvisioningCredential } from './provision.js';
 import { SlackFlowError } from './types.js';
 
 /** The Slack gate: the request came in through a Slack-channel session. */
-function isSlackOriginSession(session: Session): boolean {
+async function isSlackOriginSession(session: Session): Promise<boolean> {
   if (!session.messaging_group_id) return false;
-  return getMessagingGroup(session.messaging_group_id)?.channel_type === 'slack';
+  return (await getMessagingGroup(session.messaging_group_id))?.channel_type === 'slack';
 }
 
 // Avatar prefetch for multi-agent creates ("build me a team"): the batch
@@ -60,8 +60,8 @@ function isSlackOriginSession(session: Session): boolean {
 // The (displayName, description) derivation MUST mirror runSlackAgentFlow /
 // orchestrate exactly — a mismatch is harmless (fresh request) but wastes the
 // prefetch.
-registerDeliveryBatchPreview((batch, session) => {
-  if (!isSlackOriginSession(session)) return;
+registerDeliveryBatchPreview(async (batch, session) => {
+  if (!(await isSlackOriginSession(session))) return;
   const creates = batch
     .filter((m) => m.kind === 'system')
     .map((m) => {
@@ -129,8 +129,8 @@ function failureText(
 async function slackAwareCreateAgent(content: Record<string, unknown>, session: Session): Promise<void> {
   const name = typeof content.name === 'string' ? content.name : '';
   const localName = normalizeName(name);
-  const before = getDestinationByName(session.agent_group_id, localName);
-  const slackOrigin = isSlackOriginSession(session);
+  const before = await getDestinationByName(session.agent_group_id, localName);
+  const slackOrigin = await isSlackOriginSession(session);
 
   // Upstream behavior byte-for-byte on non-Slack sessions. On the Slack path
   // the upstream "created — you can now message it" success notify is
@@ -140,22 +140,22 @@ async function slackAwareCreateAgent(content: Record<string, unknown>, session: 
   // invalid path) still fire either way.
   await createAgent(content, session, slackOrigin ? { suppressCreatedNotify: true } : undefined);
 
-  const after = getDestinationByName(session.agent_group_id, localName);
+  const after = await getDestinationByName(session.agent_group_id, localName);
   // Creation bailed or collided — upstream already answered the requester.
   if (!after || after.target_type !== 'agent' || before) return;
   // Non-Slack sessions (and task/a2a sessions with no messaging group) behave exactly as upstream.
   if (!slackOrigin) return;
 
-  const slug = dedupeSlug(deriveInstanceSlug(name), after.target_id);
+  const slug = await dedupeSlug(deriveInstanceSlug(name), after.target_id);
   try {
     const r = await runSlackAgentFlow({ content, session, newAgentGroupId: after.target_id, slug });
-    notifyAgent(session, successText(name, r.roomChannelId));
+    await notifyAgent(session, successText(name, r.roomChannelId));
   } catch (err) {
     // SlackApiError carries the flow step id its call site passed to the
     // shared Slack lib — surface it like a typed flow step.
     const step = err instanceof SlackFlowError || err instanceof SlackApiError ? err.step : 'unknown';
     const message = err instanceof Error ? err.message : String(err);
-    notifyAgent(
+    await notifyAgent(
       session,
       failureText(
         name,
@@ -178,13 +178,13 @@ async function slackAwareCreateAgent(content: Record<string, unknown>, session: 
  * differs, telling the admin a Slack bot comes with the sub-agent.
  */
 async function requestSlackCreateAgentHold(content: Record<string, unknown>, session: Session): Promise<void> {
-  if (!isSlackOriginSession(session)) {
+  if (!(await isSlackOriginSession(session))) {
     await requestCreateAgentHold(content, session);
     return;
   }
   const name = typeof content.name === 'string' ? content.name : '';
   const instructions = typeof content.instructions === 'string' ? content.instructions : null;
-  const sourceGroup = getAgentGroup(session.agent_group_id);
+  const sourceGroup = await getAgentGroup(session.agent_group_id);
   if (!sourceGroup) return;
 
   await requestApproval({

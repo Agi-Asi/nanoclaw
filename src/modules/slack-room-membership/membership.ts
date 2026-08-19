@@ -156,7 +156,7 @@ async function resolveOwnBotUserId(instance: string, rootDir: string): Promise<s
 // ── Case 1: adopt flow ──
 
 /** Mirror of the router's auto-create shape (router.ts routeInbound step 1). */
-function createAdoptedMessagingGroup(instance: string, platformId: string): MessagingGroup {
+async function createAdoptedMessagingGroup(instance: string, platformId: string): Promise<MessagingGroup> {
   const mg: MessagingGroup = {
     id: generateId('mg'),
     channel_type: 'slack',
@@ -168,7 +168,7 @@ function createAdoptedMessagingGroup(instance: string, platformId: string): Mess
     denied_at: null,
     created_at: new Date().toISOString(),
   };
-  createMessagingGroup(mg);
+  await createMessagingGroup(mg);
   log.info('Auto-created messaging group (bot invited via Slack UI)', {
     id: mg.id,
     platformId,
@@ -241,7 +241,7 @@ async function tryMpimForkCarryOver(args: {
   }
   if (newMembers.size === 0) return false;
 
-  const all = getAllMessagingGroups();
+  const all = await getAllMessagingGroups();
   // Candidate old rooms: wired slack group rooms visible to THIS instance —
   // the superset check needs our bot in both channels for members reads.
   const candidates = all.filter(
@@ -255,7 +255,7 @@ async function tryMpimForkCarryOver(args: {
   );
 
   for (const candidate of candidates) {
-    if (getMessagingGroupAgents(candidate.id).length === 0) continue;
+    if ((await getMessagingGroupAgents(candidate.id)).length === 0) continue;
     const oldChannelId = candidate.platform_id.slice('slack:'.length);
     let oldMembers: string[];
     try {
@@ -272,9 +272,9 @@ async function tryMpimForkCarryOver(args: {
     const family = all.filter((m) => m.channel_type === 'slack' && m.platform_id === candidate.platform_id);
     const carriedAgentGroups = new Set<string>();
     for (const oldMg of family) {
-      const oldWirings = getMessagingGroupAgents(oldMg.id);
+      const oldWirings = await getMessagingGroupAgents(oldMg.id);
       if (oldWirings.length === 0) continue;
-      let newMg = getMessagingGroupByPlatform('slack', args.platformId, oldMg.instance ?? 'slack');
+      let newMg = await getMessagingGroupByPlatform('slack', args.platformId, oldMg.instance ?? 'slack');
       if (!newMg) {
         newMg = {
           id: generateId('mg'),
@@ -287,11 +287,11 @@ async function tryMpimForkCarryOver(args: {
           denied_at: null,
           created_at: now,
         };
-        createMessagingGroup(newMg);
+        await createMessagingGroup(newMg);
       }
       for (const oldWiring of oldWirings) {
-        if (getMessagingGroupAgentByPair(newMg.id, oldWiring.agent_group_id)) continue;
-        createMessagingGroupAgent({
+        if (await getMessagingGroupAgentByPair(newMg.id, oldWiring.agent_group_id)) continue;
+        await createMessagingGroupAgent({
           id: generateId('mga'),
           messaging_group_id: newMg.id,
           agent_group_id: oldWiring.agent_group_id,
@@ -358,11 +358,11 @@ async function handleOwnJoin(event: MembershipEvent, platformId: string, opts: M
   await sleep(opts.joinRecheckDelayMs ?? JOIN_RECHECK_DELAY_MS);
 
   const rootDir = opts.rootDir ?? process.cwd();
-  let mg = getMessagingGroupByPlatform('slack', platformId, event.instance);
-  if (mg && getMessagingGroupAgents(mg.id).length > 0) {
+  let mg = await getMessagingGroupByPlatform('slack', platformId, event.instance);
+  if (mg && (await getMessagingGroupAgents(mg.id)).length > 0) {
     // Already wired (flow-created or previously adopted). A rejoin re-attaches.
     if (mg.detached_at) {
-      setMessagingGroupDetachedAt(mg.id, null);
+      await setMessagingGroupDetachedAt(mg.id, null);
       log.info('Messaging group re-attached — bot rejoined', { messagingGroupId: mg.id, platformId });
     }
     return;
@@ -374,7 +374,7 @@ async function handleOwnJoin(event: MembershipEvent, platformId: string, opts: M
     });
     return;
   }
-  if (mg?.detached_at) setMessagingGroupDetachedAt(mg.id, null);
+  if (mg?.detached_at) await setMessagingGroupDetachedAt(mg.id, null);
 
   const token = readEnvValue(rootDir, botTokenKeyForInstance(event.instance));
 
@@ -413,7 +413,7 @@ async function handleOwnJoin(event: MembershipEvent, platformId: string, opts: M
     return;
   }
 
-  if (!mg) mg = createAdoptedMessagingGroup(event.instance, platformId);
+  if (!mg) mg = await createAdoptedMessagingGroup(event.instance, platformId);
   // Dedupe of a second join/mention while pending is requestChannelApproval's
   // own in-flight check (pending_channel_approvals PK on messaging_group_id).
   // The owner-presence rule (D24) rides along for free: requestChannelApproval
@@ -423,19 +423,19 @@ async function handleOwnJoin(event: MembershipEvent, platformId: string, opts: M
   await requestChannelApproval({ messagingGroupId: mg.id, event: synthesizeJoinEvent(event, platformId) });
 }
 
-function handleOwnLeft(event: MembershipEvent, platformId: string): void {
-  const mg = getMessagingGroupByPlatform('slack', platformId, event.instance);
+async function handleOwnLeft(event: MembershipEvent, platformId: string): Promise<void> {
+  const mg = await getMessagingGroupByPlatform('slack', platformId, event.instance);
   if (!mg) return;
-  setMessagingGroupDetachedAt(mg.id, new Date().toISOString());
+  await setMessagingGroupDetachedAt(mg.id, new Date().toISOString());
   log.info('Messaging group detached — bot left the channel', { messagingGroupId: mg.id, platformId });
 }
 
 /** Case 4: membership bookkeeping for wired rooms — a trigger=0 system note
  *  into every wired agent group's room sessions (D17: no approval, no gating). */
-function handleMemberChange(event: MembershipEvent, platformId: string): void {
-  const mg = getMessagingGroupByPlatform('slack', platformId, event.instance);
+async function handleMemberChange(event: MembershipEvent, platformId: string): Promise<void> {
+  const mg = await getMessagingGroupByPlatform('slack', platformId, event.instance);
   if (!mg || mg.is_group !== 1) return;
-  const wirings = getMessagingGroupAgents(mg.id);
+  const wirings = await getMessagingGroupAgents(mg.id);
   if (wirings.length === 0) return;
 
   const action = event.left ? 'left' : 'joined';
@@ -444,7 +444,7 @@ function handleMemberChange(event: MembershipEvent, platformId: string): void {
   const timestamp = new Date().toISOString();
 
   for (const wiring of wirings) {
-    const sessions = getSessionsByAgentGroup(wiring.agent_group_id).filter(
+    const sessions = (await getSessionsByAgentGroup(wiring.agent_group_id)).filter(
       (s) => s.messaging_group_id === mg.id && s.status === 'active',
     );
     for (const session of sessions) {
@@ -454,7 +454,7 @@ function handleMemberChange(event: MembershipEvent, platformId: string): void {
         // are reserved for MCP tool responses and the container poll loop
         // filters them out of agent batches (poll-loop.ts) — a 'system'-kind
         // note would sit pending forever and never reach the agent.
-        writeSessionMessage(wiring.agent_group_id, session.id, {
+        await writeSessionMessage(wiring.agent_group_id, session.id, {
           id: generateId(`member-${event.channelId}`),
           kind: 'chat',
           timestamp,
@@ -479,8 +479,8 @@ function handleMemberChange(event: MembershipEvent, platformId: string): void {
 // ── Owner-presence access rule + channel-card interception (B2/D24) ──
 
 /** Owner Slack user ids (raw U… form) from user_roles — the presence probe key. */
-function resolveOwnerSlackUserIds(): string[] {
-  return getOwners()
+async function resolveOwnerSlackUserIds(): Promise<string[]> {
+  return (await getOwners())
     .map((r) => r.user_id)
     .filter((id) => id.startsWith('slack:'))
     .map((id) => id.slice('slack:'.length));
@@ -492,27 +492,25 @@ function resolveOwnerSlackUserIds(): string[] {
  * one). Exactly one distinct hit wins; ambiguous or empty → undefined and the
  * caller falls back to the approval card.
  */
-function resolveInstanceAgentGroup(instance: string): { id: string; name: string } | undefined {
-  const rows = getAllMessagingGroups().filter(
+async function resolveInstanceAgentGroup(instance: string): Promise<{ id: string; name: string } | undefined> {
+  const rows = (await getAllMessagingGroups()).filter(
     (m) => m.channel_type === 'slack' && (m.instance ?? m.channel_type) === instance,
   );
   for (const dmOnly of [true, false]) {
     const ids = new Set<string>();
     for (const m of rows) {
       if (dmOnly && m.is_group !== 0) continue;
-      for (const wiring of getMessagingGroupAgents(m.id)) ids.add(wiring.agent_group_id);
+      for (const wiring of await getMessagingGroupAgents(m.id)) ids.add(wiring.agent_group_id);
     }
     if (ids.size === 1) {
       const id = [...ids][0]!;
-      const ag = getAgentGroup(id);
+      const ag = await getAgentGroup(id);
       if (ag) return { id, name: ag.name };
     }
   }
   return undefined;
 }
 
-/** Sender identity off an inbound payload — top-level senderId/sender (v1,
- *  synthesized events) or the chat-sdk bridge's nested author.userId. */
 /**
  * Dedupe key for the owner-absent channel decline. Constant on purpose — the
  * decline describes the channel, so it fires once per channel per the stamp's
@@ -556,7 +554,7 @@ async function declineChannelInvite(args: {
   const who = sender.name ?? sender.userId ?? 'Someone';
 
   try {
-    recordDroppedMessage({
+    await recordDroppedMessage({
       channel_type: 'slack',
       platform_id: event.platformId,
       user_id: sender.userId,
@@ -592,6 +590,8 @@ async function declineChannelInvite(args: {
   return 'handled';
 }
 
+/** Sender identity off an inbound payload — top-level senderId/sender (v1,
+ *  synthesized events) or the chat-sdk bridge's nested author.userId. */
 function senderFromEvent(event: InboundEvent): { userId: string | null; name: string | null } {
   try {
     const parsed = JSON.parse(event.message.content) as Record<string, unknown>;
@@ -669,7 +669,7 @@ export async function slackChannelCardInterceptor(
   }
 
   const isGroup = event.message.isGroup ?? mg.is_group === 1;
-  const agentGroup = resolveInstanceAgentGroup(instance);
+  const agentGroup = await resolveInstanceAgentGroup(instance);
 
   if (!isGroup) {
     // 1:1 DM — the owner is never "present" (D24 table): unknown senders are
@@ -693,13 +693,13 @@ export async function slackChannelCardInterceptor(
     }
     const sender = senderFromEvent(event);
     // Known/privileged senders are never declined — their DM still cards.
-    if (sender.userId && canAccessAgentGroup(sender.userId, agentGroup.id).allowed) return 'card';
+    if (sender.userId && (await canAccessAgentGroup(sender.userId, agentGroup.id)).allowed) return 'card';
     // Stamp the D24 default onto rows still carrying the stale declared
     // policy, so the row reflects the behavior (ncl dumps, access gate).
     if (mg.unknown_sender_policy !== 'decline_notify') {
-      updateMessagingGroup(mg.id, { unknown_sender_policy: 'decline_notify' });
+      await updateMessagingGroup(mg.id, { unknown_sender_policy: 'decline_notify' });
     }
-    recordDroppedMessage({
+    await recordDroppedMessage({
       channel_type: 'slack',
       platform_id: event.platformId,
       user_id: sender.userId,
@@ -720,7 +720,7 @@ export async function slackChannelCardInterceptor(
 
   // Group / MPIM / channel — the owner-presence rule proper.
   if (!token) return 'card';
-  const ownerIds = resolveOwnerSlackUserIds();
+  const ownerIds = await resolveOwnerSlackUserIds();
   if (ownerIds.length === 0) return 'card';
   let members: string[];
   try {
@@ -752,9 +752,9 @@ export async function slackChannelCardInterceptor(
   // Owner present → open: 'public' mg + mention/accumulate wiring (room
   // semantics — anyone there can task the agent; unmentioned chatter
   // accumulates as context). No card, no notification.
-  updateMessagingGroup(mg.id, { unknown_sender_policy: 'public' });
-  if (!getMessagingGroupAgentByPair(mg.id, agentGroup.id)) {
-    createMessagingGroupAgent({
+  await updateMessagingGroup(mg.id, { unknown_sender_policy: 'public' });
+  if (!(await getMessagingGroupAgentByPair(mg.id, agentGroup.id))) {
+    await createMessagingGroupAgent({
       id: generateId('mga'),
       messaging_group_id: mg.id,
       agent_group_id: agentGroup.id,
@@ -809,11 +809,11 @@ export async function handleSlackMembershipEvent(event: MembershipEvent, opts: M
     const isOwnBot = ownBotUserId !== undefined && normalizedEvent.userId === ownBotUserId;
 
     if (isOwnBot) {
-      if (normalizedEvent.left) handleOwnLeft(normalizedEvent, platformId);
+      if (normalizedEvent.left) await handleOwnLeft(normalizedEvent, platformId);
       else await handleOwnJoin(normalizedEvent, platformId, opts);
       return;
     }
-    handleMemberChange(normalizedEvent, platformId);
+    await handleMemberChange(normalizedEvent, platformId);
   } catch (err) {
     log.error('slack-room-membership: event handling failed', {
       channelId: event.channelId,

@@ -237,7 +237,9 @@ const OPERATOR = 'U0OPERATOR';
 
 const now = () => new Date().toISOString();
 
-function mg(partial: Partial<MessagingGroup> & Pick<MessagingGroup, 'id' | 'platform_id'>): MessagingGroup {
+async function mg(
+  partial: Partial<MessagingGroup> & Pick<MessagingGroup, 'id' | 'platform_id'>,
+): Promise<MessagingGroup> {
   const row: MessagingGroup = {
     channel_type: 'slack',
     instance: 'slack',
@@ -247,11 +249,15 @@ function mg(partial: Partial<MessagingGroup> & Pick<MessagingGroup, 'id' | 'plat
     created_at: now(),
     ...partial,
   };
-  createMessagingGroup(row);
+  await createMessagingGroup(row);
   return row;
 }
 
-function wire(mgId: string, agentGroupId: string, partial: Partial<MessagingGroupAgent> = {}): MessagingGroupAgent {
+async function wire(
+  mgId: string,
+  agentGroupId: string,
+  partial: Partial<MessagingGroupAgent> = {},
+): Promise<MessagingGroupAgent> {
   const row: MessagingGroupAgent = {
     id: `mga-${mgId}-${agentGroupId}`,
     messaging_group_id: mgId,
@@ -265,11 +271,11 @@ function wire(mgId: string, agentGroupId: string, partial: Partial<MessagingGrou
     created_at: now(),
     ...partial,
   };
-  createMessagingGroupAgent(row);
+  await createMessagingGroupAgent(row);
   return row;
 }
 
-function session(id: string, agentGroupId: string, messagingGroupId: string | null): Session {
+async function session(id: string, agentGroupId: string, messagingGroupId: string | null): Promise<Session> {
   const s: Session = {
     id,
     agent_group_id: agentGroupId,
@@ -281,7 +287,7 @@ function session(id: string, agentGroupId: string, messagingGroupId: string | nu
     last_active: null,
     created_at: now(),
   };
-  createSession(s);
+  await createSession(s);
   return s;
 }
 
@@ -299,12 +305,12 @@ async function handle(event: MembershipEvent): Promise<void> {
   await handleSlackMembershipEvent(event, { joinRecheckDelayMs: 0, rootDir: '/fake-root' });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
   clearOwnBotIdCache();
   fakeDb.reset();
-  createAgentGroup({ id: 'ag-andy', name: 'Andy', folder: 'andy', agent_provider: null, created_at: now() });
-  createAgentGroup({ id: 'ag-pixel', name: 'Pixel', folder: 'pixel', agent_provider: null, created_at: now() });
+  await createAgentGroup({ id: 'ag-andy', name: 'Andy', folder: 'andy', agent_provider: null, created_at: now() });
+  await createAgentGroup({ id: 'ag-pixel', name: 'Pixel', folder: 'pixel', agent_provider: null, created_at: now() });
 
   // Token table: default instance + pixel sibling. auth.test maps token → bot id.
   mockEnv.readEnvValue.mockImplementation((_root: string, key: string) => {
@@ -324,7 +330,7 @@ describe('own-bot join — adopt flow (case 1)', () => {
   it('unknown channel: creates the mg row (router shape) and fires the approval card with a synthesized greeting', async () => {
     await handle(joinEvent({ inviterId: OPERATOR }));
 
-    const created = getMessagingGroupByPlatform('slack', 'slack:C0NEW', 'slack');
+    const created = await getMessagingGroupByPlatform('slack', 'slack:C0NEW', 'slack');
     expect(created).toMatchObject({
       channel_type: 'slack',
       is_group: 1,
@@ -357,7 +363,7 @@ describe('own-bot join — adopt flow (case 1)', () => {
     ['slack:G0NEW:', 'G0NEW'],
     ['slack:C0NEW:1724264405.531769', 'C0NEW'],
   ])('normalizes encoded channel id %s and reuses the router-created messaging group', async (encoded, raw) => {
-    const existing = mg({
+    const existing = await mg({
       id: `mg-router-${raw}`,
       platform_id: `slack:${raw}`,
       unknown_sender_policy: 'request_approval',
@@ -365,7 +371,7 @@ describe('own-bot join — adopt flow (case 1)', () => {
 
     await handle(joinEvent({ channelId: encoded, inviterId: OPERATOR }));
 
-    expect(getAllMessagingGroups()).toHaveLength(1);
+    expect(await getAllMessagingGroups()).toHaveLength(1);
     expect(mockApi.slackConversationsInfo).toHaveBeenCalledWith('xoxb-own', raw, 'membership');
     expect(mockRequestChannelApproval).toHaveBeenCalledTimes(1);
     expect(mockRequestChannelApproval).toHaveBeenCalledWith({
@@ -381,10 +387,10 @@ describe('own-bot join — adopt flow (case 1)', () => {
     // persisted a malformed `slack:slack:C0NEW:` row here.
     await handle(joinEvent({ channelId: 'slack:C0NEW:', inviterId: OPERATOR }));
 
-    const all = getAllMessagingGroups();
+    const all = await getAllMessagingGroups();
     expect(all).toHaveLength(1);
     expect(all[0]).toMatchObject({ channel_type: 'slack', platform_id: 'slack:C0NEW', instance: 'slack' });
-    expect(getMessagingGroupByPlatform('slack', 'slack:slack:C0NEW:', 'slack')).toBeUndefined();
+    expect(await getMessagingGroupByPlatform('slack', 'slack:slack:C0NEW:', 'slack')).toBeUndefined();
     expect(mockRequestChannelApproval).toHaveBeenCalledTimes(1);
     expect(mockRequestChannelApproval).toHaveBeenCalledWith({
       messagingGroupId: all[0]!.id,
@@ -395,7 +401,7 @@ describe('own-bot join — adopt flow (case 1)', () => {
   it('rejects a double-prefixed channel id instead of persisting dead wiring', async () => {
     await handle(joinEvent({ channelId: 'slack:slack:C0NEW:' }));
 
-    expect(getAllMessagingGroups()).toHaveLength(0);
+    expect(await getAllMessagingGroups()).toHaveLength(0);
     expect(mockApi.slackAuthTest).not.toHaveBeenCalled();
     expect(mockApi.slackConversationsInfo).not.toHaveBeenCalled();
     expect(mockRequestChannelApproval).not.toHaveBeenCalled();
@@ -406,29 +412,29 @@ describe('own-bot join — adopt flow (case 1)', () => {
 
     await handle(joinEvent({}));
 
-    expect(getMessagingGroupByPlatform('slack', 'slack:C0NEW', 'slack')).toBeUndefined();
+    expect(await getMessagingGroupByPlatform('slack', 'slack:C0NEW', 'slack')).toBeUndefined();
     expect(mockRequestChannelApproval).not.toHaveBeenCalled();
   });
 
   it('denied tombstone holds: no card, no new rows', async () => {
-    const denied = mg({ id: 'mg-denied', platform_id: 'slack:C0NEW', unknown_sender_policy: 'request_approval' });
-    setMessagingGroupDeniedAt(denied.id, now());
+    const denied = await mg({ id: 'mg-denied', platform_id: 'slack:C0NEW', unknown_sender_policy: 'request_approval' });
+    await setMessagingGroupDeniedAt(denied.id, now());
 
     await handle(joinEvent({ inviterId: OPERATOR }));
 
     expect(mockRequestChannelApproval).not.toHaveBeenCalled();
-    expect(getAllMessagingGroups()).toHaveLength(1);
+    expect(await getAllMessagingGroups()).toHaveLength(1);
   });
 
   it('already-wired channel: silent, and a rejoin clears detached_at', async () => {
-    const room = mg({ id: 'mg-room', platform_id: 'slack:C0NEW' });
-    wire(room.id, 'ag-andy');
-    setMessagingGroupDetachedAt(room.id, now());
+    const room = await mg({ id: 'mg-room', platform_id: 'slack:C0NEW' });
+    await wire(room.id, 'ag-andy');
+    await setMessagingGroupDetachedAt(room.id, now());
 
     await handle(joinEvent());
 
     expect(mockRequestChannelApproval).not.toHaveBeenCalled();
-    expect(isMessagingGroupDetached(room.id)).toBe(false);
+    expect(await isMessagingGroupDetached(room.id)).toBe(false);
   });
 
   it('no bot token for the instance: treated as a foreign member, no adopt', async () => {
@@ -437,22 +443,26 @@ describe('own-bot join — adopt flow (case 1)', () => {
     await handle(joinEvent());
 
     expect(mockRequestChannelApproval).not.toHaveBeenCalled();
-    expect(getAllMessagingGroups()).toHaveLength(0);
+    expect(await getAllMessagingGroups()).toHaveLength(0);
   });
 });
 
 describe('own-bot join — MPIM-fork carry-over (case 2)', () => {
-  function seedOldRoom(): { oldDefault: MessagingGroup; oldPixel: MessagingGroup } {
+  async function seedOldRoom(): Promise<{ oldDefault: MessagingGroup; oldPixel: MessagingGroup }> {
     // Old wired room G0OLD, two instances (default + pixel sibling).
-    const oldDefault = mg({ id: 'mg-old-slack', platform_id: 'slack:G0OLD', name: 'Pixel room' });
-    const oldPixel = mg({
+    const oldDefault = await mg({ id: 'mg-old-slack', platform_id: 'slack:G0OLD', name: 'Pixel room' });
+    const oldPixel = await mg({
       id: 'mg-old-pixel',
       platform_id: 'slack:G0OLD',
       instance: 'slack-pixel',
       name: 'Pixel room',
     });
-    wire(oldDefault.id, 'ag-andy', { engage_mode: 'mention', ignored_message_policy: 'accumulate', threads: 1 });
-    wire(oldPixel.id, 'ag-pixel', { engage_mode: 'mention', ignored_message_policy: 'accumulate' });
+    await wire(oldDefault.id, 'ag-andy', {
+      engage_mode: 'mention',
+      ignored_message_policy: 'accumulate',
+      threads: 1,
+    });
+    await wire(oldPixel.id, 'ag-pixel', { engage_mode: 'mention', ignored_message_policy: 'accumulate' });
     return { oldDefault, oldPixel };
   }
 
@@ -466,7 +476,7 @@ describe('own-bot join — MPIM-fork carry-over (case 2)', () => {
   });
 
   it('superset MPIM: mirrors every instance row + wiring, carries the allowlist, posts the moved note, no card', async () => {
-    seedOldRoom();
+    await seedOldRoom();
     mockEnv.readEnvValue.mockImplementation((_root: string, key: string) => {
       if (key === 'SLACK_BOT_TOKEN') return 'xoxb-own';
       if (key === 'SLACK_BOT_TOKEN_PIXEL') return 'xoxb-pixel';
@@ -480,23 +490,23 @@ describe('own-bot join — MPIM-fork carry-over (case 2)', () => {
     expect(mockRequestChannelApproval).not.toHaveBeenCalled();
 
     // Mirrored rows for BOTH instances, same agent groups, same engage values.
-    const newDefault = getMessagingGroupByPlatform('slack', 'slack:G0NEW', 'slack');
-    const newPixel = getMessagingGroupByPlatform('slack', 'slack:G0NEW', 'slack-pixel');
+    const newDefault = await getMessagingGroupByPlatform('slack', 'slack:G0NEW', 'slack');
+    const newPixel = await getMessagingGroupByPlatform('slack', 'slack:G0NEW', 'slack-pixel');
     expect(newDefault).toMatchObject({ is_group: 1, unknown_sender_policy: 'public', name: 'Pixel room' });
     expect(newPixel).toMatchObject({ is_group: 1, unknown_sender_policy: 'public', name: 'Pixel room' });
-    expect(getMessagingGroupAgentByPair(newDefault!.id, 'ag-andy')).toMatchObject({
+    expect(await getMessagingGroupAgentByPair(newDefault!.id, 'ag-andy')).toMatchObject({
       engage_mode: 'mention',
       ignored_message_policy: 'accumulate',
       threads: 1,
     });
-    expect(getMessagingGroupAgentByPair(newPixel!.id, 'ag-pixel')).toMatchObject({
+    expect(await getMessagingGroupAgentByPair(newPixel!.id, 'ag-pixel')).toMatchObject({
       engage_mode: 'mention',
       ignored_message_policy: 'accumulate',
     });
 
     // Old room untouched.
-    expect(getMessagingGroupAgents('mg-old-slack')).toHaveLength(1);
-    expect(getMessagingGroup('mg-old-slack')!.denied_at ?? null).toBeNull();
+    expect(await getMessagingGroupAgents('mg-old-slack')).toHaveLength(1);
+    expect((await getMessagingGroup('mg-old-slack'))!.denied_at ?? null).toBeNull();
 
     // Allowlist carried, destinations projected, note posted as the bot.
     expect(mockEnv.appendToEnvList).toHaveBeenCalledWith('/fake-root', 'SLACK_A2A_ROOMS', 'G0NEW');
@@ -506,7 +516,7 @@ describe('own-bot join — MPIM-fork carry-over (case 2)', () => {
   });
 
   it('old room not allowlisted: wiring carries over but SLACK_A2A_ROOMS is untouched', async () => {
-    seedOldRoom();
+    await seedOldRoom();
 
     await handle(joinEvent({ channelId: 'G0NEW' }));
 
@@ -515,7 +525,7 @@ describe('own-bot join — MPIM-fork carry-over (case 2)', () => {
   });
 
   it('non-superset member set: falls through to the adopt card', async () => {
-    seedOldRoom();
+    await seedOldRoom();
     mockApi.slackConversationsMembers.mockImplementation(async (_token: string, channelId: string) => {
       if (channelId === 'G0OLD') return [OPERATOR, OWN_BOT, PIXEL_BOT];
       if (channelId === 'G0NEW') return [OPERATOR, OWN_BOT, 'U0STRANGER']; // pixel bot missing
@@ -525,11 +535,11 @@ describe('own-bot join — MPIM-fork carry-over (case 2)', () => {
     await handle(joinEvent({ channelId: 'G0NEW' }));
 
     expect(mockRequestChannelApproval).toHaveBeenCalledTimes(1);
-    expect(getMessagingGroupByPlatform('slack', 'slack:G0NEW', 'slack-pixel')).toBeUndefined();
+    expect(await getMessagingGroupByPlatform('slack', 'slack:G0NEW', 'slack-pixel')).toBeUndefined();
   });
 
   it('non-MPIM channel: no fork check, straight to the adopt card', async () => {
-    seedOldRoom();
+    await seedOldRoom();
     mockApi.slackConversationsInfo.mockResolvedValue({ isMpim: false });
 
     await handle(joinEvent({ channelId: 'C0CHANNEL' }));
@@ -541,29 +551,29 @@ describe('own-bot join — MPIM-fork carry-over (case 2)', () => {
 
 describe('own-bot left (case 3)', () => {
   it('wired channel: marks the mg detached', async () => {
-    const room = mg({ id: 'mg-room', platform_id: 'slack:C0NEW' });
-    wire(room.id, 'ag-andy');
+    const room = await mg({ id: 'mg-room', platform_id: 'slack:C0NEW' });
+    await wire(room.id, 'ag-andy');
 
     await handle(joinEvent({ left: true }));
 
-    expect(isMessagingGroupDetached(room.id)).toBe(true);
+    expect(await isMessagingGroupDetached(room.id)).toBe(true);
   });
 
   it('unknown channel: no-op', async () => {
     await handle(joinEvent({ left: true }));
-    expect(getAllMessagingGroups()).toHaveLength(0);
+    expect(await getAllMessagingGroups()).toHaveLength(0);
   });
 });
 
 describe('non-bot membership change in a wired room (case 4)', () => {
   it('human joined: system-sender note (trigger 0, channel_type agent) into every wired room session', async () => {
-    const room = mg({ id: 'mg-room', platform_id: 'slack:C0NEW' });
-    const elsewhere = mg({ id: 'mg-elsewhere', platform_id: 'slack:D0DM', is_group: 0 });
-    wire(room.id, 'ag-andy');
-    wire(room.id, 'ag-pixel');
-    session('sess-andy-room', 'ag-andy', room.id);
-    session('sess-andy-dm', 'ag-andy', elsewhere.id); // different mg — no note
-    session('sess-pixel-room', 'ag-pixel', room.id);
+    const room = await mg({ id: 'mg-room', platform_id: 'slack:C0NEW' });
+    const elsewhere = await mg({ id: 'mg-elsewhere', platform_id: 'slack:D0DM', is_group: 0 });
+    await wire(room.id, 'ag-andy');
+    await wire(room.id, 'ag-pixel');
+    await session('sess-andy-room', 'ag-andy', room.id);
+    await session('sess-andy-dm', 'ag-andy', elsewhere.id); // different mg — no note
+    await session('sess-pixel-room', 'ag-pixel', room.id);
 
     await handle(joinEvent({ userId: 'U0NEWHUMAN', inviterId: OPERATOR }));
 
@@ -588,9 +598,9 @@ describe('non-bot membership change in a wired room (case 4)', () => {
   });
 
   it('foreign bot left: note says left, no inviter clause', async () => {
-    const room = mg({ id: 'mg-room', platform_id: 'slack:C0NEW' });
-    wire(room.id, 'ag-andy');
-    session('sess-andy-room', 'ag-andy', room.id);
+    const room = await mg({ id: 'mg-room', platform_id: 'slack:C0NEW' });
+    await wire(room.id, 'ag-andy');
+    await session('sess-andy-room', 'ag-andy', room.id);
 
     await handle(joinEvent({ userId: PIXEL_BOT, left: true }));
 
@@ -635,16 +645,16 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
 
   /** Owner identity + the instance's DM wiring (what every per-agent
    *  instance has) — the two facts the interceptor resolves against. */
-  function seedOwnerAndInstanceDm(): void {
-    grantRole({
+  async function seedOwnerAndInstanceDm(): Promise<void> {
+    await grantRole({
       user_id: `slack:${OPERATOR}`,
       role: 'owner',
       agent_group_id: null,
       granted_by: null,
       granted_at: now(),
     });
-    const dm = mg({ id: 'mg-dm-andy', platform_id: 'slack:D0ANDY', is_group: 0 });
-    wire(dm.id, 'ag-andy');
+    const dm = await mg({ id: 'mg-dm-andy', platform_id: 'slack:D0ANDY', is_group: 0 });
+    await wire(dm.id, 'ag-andy');
   }
 
   async function intercept(row: MessagingGroup, event: InboundEvent): Promise<'card' | 'handled'> {
@@ -652,16 +662,16 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
   }
 
   it('owner present in the channel: auto-wires mention/accumulate, flips mg to public, replays — no card', async () => {
-    seedOwnerAndInstanceDm();
-    const room = mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
+    await seedOwnerAndInstanceDm();
+    const room = await mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
     mockApi.slackConversationsInfo.mockResolvedValue({ isMpim: true, creator: OPERATOR });
     mockApi.slackConversationsMembers.mockResolvedValue([OPERATOR, OWN_BOT, 'U0STRANGER']);
 
     const event = mentionEvent('slack:C0ROOM');
     expect(await intercept(room, event)).toBe('handled');
 
-    expect(getMessagingGroup(room.id)).toMatchObject({ unknown_sender_policy: 'public' });
-    expect(getMessagingGroupAgentByPair(room.id, 'ag-andy')).toMatchObject({
+    expect(await getMessagingGroup(room.id)).toMatchObject({ unknown_sender_policy: 'public' });
+    expect(await getMessagingGroupAgentByPair(room.id, 'ag-andy')).toMatchObject({
       engage_mode: 'mention',
       ignored_message_policy: 'accumulate',
       sender_scope: 'all',
@@ -673,8 +683,8 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
   });
 
   it('owner absent in a channel: declines in-channel and FYIs the owner — no card, no wiring', async () => {
-    seedOwnerAndInstanceDm();
-    const room = mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
+    await seedOwnerAndInstanceDm();
+    const room = await mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
     mockApi.slackConversationsInfo.mockResolvedValue({ isMpim: false, name: 'dogfood', creator: 'U0STRANGER' });
     mockApi.slackConversationsMembers.mockResolvedValue([OWN_BOT, 'U0STRANGER']);
 
@@ -693,27 +703,28 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
     expect(call.fyiText).toContain('Dana');
     expect(call.fyiText).toContain('#dogfood');
     // Not a card, and nothing was wired or routed.
-    expect(getMessagingGroupAgents(room.id)).toHaveLength(0);
-    expect(getMessagingGroup(room.id)).toMatchObject({ unknown_sender_policy: 'request_approval' });
+    expect(await getMessagingGroupAgents(room.id)).toHaveLength(0);
+    expect(await getMessagingGroup(room.id)).toMatchObject({ unknown_sender_policy: 'request_approval' });
     expect(mockRouteInbound).not.toHaveBeenCalled();
   });
 
   it('owner absent in an MPIM: still cards — a group DM invite stays an ask', async () => {
-    seedOwnerAndInstanceDm();
-    const room = mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
+    await seedOwnerAndInstanceDm();
+    const room = await mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
     mockApi.slackConversationsInfo.mockResolvedValue({ isMpim: true, creator: 'U0STRANGER' });
     mockApi.slackConversationsMembers.mockResolvedValue([OWN_BOT, 'U0STRANGER']);
 
     expect(await intercept(room, mentionEvent('slack:C0ROOM'))).toBe('card');
 
     expect(mockDeclineAndNotify).not.toHaveBeenCalled();
-    expect(getMessagingGroupAgents(room.id)).toHaveLength(0);
+    expect(await getMessagingGroupAgents(room.id)).toHaveLength(0);
+    expect(await getMessagingGroup(room.id)).toMatchObject({ unknown_sender_policy: 'request_approval' });
     expect(mockRouteInbound).not.toHaveBeenCalled();
   });
 
   it('owner absent but the conversation could not be classified: cards rather than guessing', async () => {
-    seedOwnerAndInstanceDm();
-    const room = mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
+    await seedOwnerAndInstanceDm();
+    const room = await mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
     mockApi.slackConversationsInfo.mockRejectedValue(new Error('ratelimited'));
     mockApi.slackConversationsMembers.mockResolvedValue([OWN_BOT, 'U0STRANGER']);
 
@@ -722,42 +733,46 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
   });
 
   it('owner present but instance→agent-group resolution ambiguous: card', async () => {
-    seedOwnerAndInstanceDm();
+    await seedOwnerAndInstanceDm();
     // A second DM wiring on the same instance to a different agent group.
-    const dm2 = mg({ id: 'mg-dm-pixel', platform_id: 'slack:D0PIXEL', is_group: 0 });
-    wire(dm2.id, 'ag-pixel');
-    const room = mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
+    const dm2 = await mg({ id: 'mg-dm-pixel', platform_id: 'slack:D0PIXEL', is_group: 0 });
+    await wire(dm2.id, 'ag-pixel');
+    const room = await mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
     mockApi.slackConversationsMembers.mockResolvedValue([OPERATOR, OWN_BOT]);
 
     expect(await intercept(room, mentionEvent('slack:C0ROOM'))).toBe('card');
-    expect(getMessagingGroupAgents(room.id)).toHaveLength(0);
+    expect(await getMessagingGroupAgents(room.id)).toHaveLength(0);
   });
 
   it('no owner with a Slack identity: card (no members probe)', async () => {
-    const dm = mg({ id: 'mg-dm-andy', platform_id: 'slack:D0ANDY', is_group: 0 });
-    wire(dm.id, 'ag-andy');
-    const room = mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
+    const dm = await mg({ id: 'mg-dm-andy', platform_id: 'slack:D0ANDY', is_group: 0 });
+    await wire(dm.id, 'ag-andy');
+    const room = await mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
 
     expect(await intercept(room, mentionEvent('slack:C0ROOM'))).toBe('card');
     expect(mockApi.slackConversationsMembers).not.toHaveBeenCalled();
   });
 
   it('USLACKBOT-created shadow channel: silently handled — no wiring, no decline, no replay', async () => {
-    seedOwnerAndInstanceDm();
-    const shadow = mg({ id: 'mg-shadow', platform_id: 'slack:C0SHADOW', unknown_sender_policy: 'request_approval' });
+    await seedOwnerAndInstanceDm();
+    const shadow = await mg({
+      id: 'mg-shadow',
+      platform_id: 'slack:C0SHADOW',
+      unknown_sender_policy: 'request_approval',
+    });
     mockApi.slackConversationsInfo.mockResolvedValue({ isMpim: false, name: 'Untitled', creator: 'USLACKBOT' });
 
     expect(await intercept(shadow, mentionEvent('slack:C0SHADOW'))).toBe('handled');
 
-    expect(getMessagingGroupAgents(shadow.id)).toHaveLength(0);
+    expect(await getMessagingGroupAgents(shadow.id)).toHaveLength(0);
     expect(mockRouteInbound).not.toHaveBeenCalled();
     expect(mockDeclineAndNotify).not.toHaveBeenCalled();
     expect(mockApi.slackConversationsMembers).not.toHaveBeenCalled();
   });
 
   it('stranger 1:1 DM with decline_notify policy: declines and notifies, no card', async () => {
-    seedOwnerAndInstanceDm();
-    const dm = mg({
+    await seedOwnerAndInstanceDm();
+    const dm = await mg({
       id: 'mg-dm-stranger',
       platform_id: 'slack:D0STRANGER',
       is_group: 0,
@@ -777,13 +792,13 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
       event,
     });
     expect(mockRecordDropped).toHaveBeenCalledTimes(1);
-    expect(getMessagingGroupAgents(dm.id)).toHaveLength(0);
+    expect(await getMessagingGroupAgents(dm.id)).toHaveLength(0);
     expect(mockRouteInbound).not.toHaveBeenCalled();
   });
 
   it('owner DM with decline_notify policy: never declined — card fallback', async () => {
-    seedOwnerAndInstanceDm();
-    const dm = mg({
+    await seedOwnerAndInstanceDm();
+    const dm = await mg({
       id: 'mg-dm-owner',
       platform_id: 'slack:D0OWNER',
       is_group: 0,
@@ -797,8 +812,8 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
   });
 
   it('stranger 1:1 DM with the stale request_approval default: declines and stamps the row decline_notify', async () => {
-    seedOwnerAndInstanceDm();
-    const dm = mg({
+    await seedOwnerAndInstanceDm();
+    const dm = await mg({
       id: 'mg-dm-x',
       platform_id: 'slack:D0X',
       is_group: 0,
@@ -818,13 +833,13 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
       event,
     });
     // The D24 flip is stamped onto the row so the DB matches the behavior.
-    expect(getMessagingGroup(dm.id)).toMatchObject({ unknown_sender_policy: 'decline_notify' });
+    expect(await getMessagingGroup(dm.id)).toMatchObject({ unknown_sender_policy: 'decline_notify' });
   });
 
   it("1:1 DM with an operator-set 'strict' or 'public' policy keeps today's card", async () => {
-    seedOwnerAndInstanceDm();
+    await seedOwnerAndInstanceDm();
     for (const policy of ['strict', 'public'] as const) {
-      const dm = mg({
+      const dm = await mg({
         id: `mg-dm-${policy}`,
         platform_id: `slack:D0${policy.toUpperCase()}`,
         is_group: 0,
@@ -834,18 +849,18 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
       expect(await intercept(dm, mentionEvent(dm.platform_id, { isGroup: false, senderId: 'U0STRANGER' }))).toBe(
         'card',
       );
-      expect(getMessagingGroup(dm.id)).toMatchObject({ unknown_sender_policy: policy });
+      expect(await getMessagingGroup(dm.id)).toMatchObject({ unknown_sender_policy: policy });
     }
     expect(mockDeclineAndNotify).not.toHaveBeenCalled();
   });
 
   it('stranger 1:1 DM with ambiguous instance→agent-group resolution: card, no decline', async () => {
-    seedOwnerAndInstanceDm();
+    await seedOwnerAndInstanceDm();
     // A second DM wiring on the same instance to a different agent group —
     // privileged senders can't be recognized, so nobody may be declined.
-    const dm2 = mg({ id: 'mg-dm-pixel', platform_id: 'slack:D0PIXEL', is_group: 0 });
-    wire(dm2.id, 'ag-pixel');
-    const dm = mg({
+    const dm2 = await mg({ id: 'mg-dm-pixel', platform_id: 'slack:D0PIXEL', is_group: 0 });
+    await wire(dm2.id, 'ag-pixel');
+    const dm = await mg({
       id: 'mg-dm-ambig',
       platform_id: 'slack:D0AMBIG',
       is_group: 0,
@@ -858,11 +873,11 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
   });
 
   it('conversations.members failure: card fallback (never silent loss)', async () => {
-    seedOwnerAndInstanceDm();
-    const room = mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
+    await seedOwnerAndInstanceDm();
+    const room = await mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
     mockApi.slackConversationsMembers.mockRejectedValue(new Error('ratelimited'));
 
     expect(await intercept(room, mentionEvent('slack:C0ROOM'))).toBe('card');
-    expect(getMessagingGroupAgents(room.id)).toHaveLength(0);
+    expect(await getMessagingGroupAgents(room.id)).toHaveLength(0);
   });
 });

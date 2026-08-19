@@ -1,37 +1,62 @@
 import fs from 'fs';
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-const constructed: Array<Record<string, unknown>> = [];
-
-// Capture what the adapter hands the SDK. The real client would open a network
-// stack on construction, so it's replaced wholesale.
-vi.mock('@getdial/sdk', () => ({
-  DialClient: class {
-    constructor(config: Record<string, unknown>) {
-      constructed.push(config);
-    }
-  },
-}));
-
+import type { OutboundMessage } from './adapter.js';
 import { createDialAdapter } from './dial.js';
 import { nanoclawUserAgent } from './dial-user-agent.js';
 
+/** Send one reply through the adapter and hand back the intercepted request. */
+async function captureSend(): Promise<{ url: string; init: RequestInit }> {
+  const calls: Array<{ url: string; init: RequestInit }> = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    calls.push({ url: String(input), init: init ?? {} });
+    return new Response(JSON.stringify({ message: { id: 'msg_1' } }), {
+      status: 201,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  });
+  const adapter = createDialAdapter({ apiKey: 'sk_live_test', fromNumber: '+14155550123', cliPath: 'dial' });
+  await adapter.deliver('+14155550123', '+15557654321', { content: 'hi' } as unknown as OutboundMessage);
+  expect(calls).toHaveLength(1);
+  return calls[0];
+}
+
 describe('Dial adapter client identification', () => {
-  beforeEach(() => {
-    constructed.length = 0;
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
-  it('passes the NanoClaw user-agent token to DialClient', () => {
-    createDialAdapter({ apiKey: 'sk_live_test', fromNumber: '+14155550123', cliPath: 'dial' });
-    expect(constructed).toHaveLength(1);
-    expect(constructed[0].userAgent).toBe(nanoclawUserAgent());
-    expect(constructed[0].userAgent).toMatch(/^nanoclaw\//);
+  it('sends the NanoClaw user-agent token on the outbound request', async () => {
+    const { init } = await captureSend();
+    const headers = init.headers as Record<string, string>;
+    expect(headers['User-Agent']).toBe(nanoclawUserAgent());
+    expect(headers['User-Agent']).toMatch(/^nanoclaw\//);
   });
 
-  it('still passes the API key alongside it', () => {
-    createDialAdapter({ apiKey: 'sk_live_test', fromNumber: '+14155550123', cliPath: 'dial' });
-    expect(constructed[0].apiKey).toBe('sk_live_test');
+  it('carries the API key as a bearer token alongside it', async () => {
+    const { init } = await captureSend();
+    const headers = init.headers as Record<string, string>;
+    expect(headers.Authorization).toBe('Bearer sk_live_test');
+  });
+
+  it('posts to the documented messages endpoint with the reply payload', async () => {
+    const { url, init } = await captureSend();
+    expect(url).toBe('https://api.getdial.ai/api/v1/messages');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(init.body as string)).toEqual({
+      to: '+15557654321',
+      body: 'hi',
+      fromNumber: '+14155550123',
+    });
+  });
+
+  it('throws on a non-2xx so the send lands on the delivery retry path', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('nope', { status: 500 }));
+    const adapter = createDialAdapter({ apiKey: 'sk_live_test', fromNumber: '+14155550123', cliPath: 'dial' });
+    await expect(
+      adapter.deliver('+14155550123', '+15557654321', { content: 'hi' } as unknown as OutboundMessage),
+    ).rejects.toThrow(/Dial API error 500/);
   });
 });
 

@@ -4,7 +4,10 @@
  * Dial (https://getdial.ai) gives an agent a real phone number — SMS and
  * AI-handled voice calls. Native adapter (no Chat SDK bridge).
  *
- *   - Outbound SMS via the official `@getdial/sdk` (`DialClient.sendMessage`).
+ *   - Outbound SMS via a direct POST to Dial's documented REST endpoint
+ *     (`POST /api/v1/messages`). Deliberately not the `@getdial/sdk` client:
+ *     the adapter needs exactly this one call, and the SDK's `pubnub`
+ *     dependency drags react-native, Metro and Hermes into the lockfile.
  *   - Inbound via Dial's documented CLI command-target
  *     (docs.getdial.ai/integrations/agent-clients/nanoclaw): the `dial listen`
  *     daemon runs a spool handler per event; the adapter watches the spool
@@ -32,8 +35,6 @@ import fs from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
-import { DialClient } from '@getdial/sdk';
-
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
 import { tryConsume } from './dial-pairing.js';
@@ -59,6 +60,9 @@ export function recordPairingCandidate(fromNumber: string, at: string = new Date
 
 /** Longest SMS body sent in one shot; longer text is chunked. */
 const MAX_CHUNK = 1500;
+
+/** Dial's REST base. Matches the SDK's own default; override for a self-hosted API. */
+const DIAL_API_BASE_URL = process.env.DIAL_API_BASE_URL || 'https://api.getdial.ai';
 
 /** Dedup window — the listen daemon retries a failed handler invocation once. */
 const DEDUP_TTL_MS = 5 * 60_000;
@@ -131,7 +135,33 @@ const DIAL_DEFAULTS: ChannelDefaults = {
 };
 
 export function createDialAdapter(config: DialConfig): ChannelAdapter {
-  const client = new DialClient({ apiKey: config.apiKey, userAgent: nanoclawUserAgent() });
+  /**
+   * `POST /api/v1/messages` — the one Dial API call this adapter makes.
+   * Mirrors the SDK's own request: bearer key, JSON body, `{ message }`
+   * envelope, and a throw carrying the status and body on a non-2xx (which is
+   * what puts a failed send on the delivery retry path, see deliver()).
+   */
+  async function postMessage(params: { to: string; body: string; fromNumber?: string }): Promise<string | undefined> {
+    const res = await fetch(`${DIAL_API_BASE_URL}/api/v1/messages`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.apiKey}`,
+        'Content-Type': 'application/json',
+        'User-Agent': nanoclawUserAgent(),
+      },
+      body: JSON.stringify({
+        to: params.to,
+        body: params.body,
+        ...(params.fromNumber ? { fromNumber: params.fromNumber } : {}),
+      }),
+    });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`Dial API error ${res.status}: ${detail}`);
+    }
+    const data = (await res.json()) as { message?: { id?: string } };
+    return data.message?.id;
+  }
   const spoolDir = path.join(DATA_DIR, 'dial', 'inbound');
   const handlerPath = path.join(DATA_DIR, 'dial', 'handle-dial-event.sh');
   // Fallback line for events that don't name the number they arrived on. Each
@@ -162,12 +192,12 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     const fromNumber = from || wiredLine();
     let lastId: string | undefined;
     for (const chunk of body.length <= MAX_CHUNK ? [body] : chunkText(body, MAX_CHUNK)) {
-      const sent = await client.sendMessage({
+      const sentId = await postMessage({
         to,
         body: chunk,
         ...(fromNumber ? { fromNumber } : {}),
       });
-      lastId = sent?.id ?? lastId;
+      lastId = sentId ?? lastId;
     }
     return lastId;
   }

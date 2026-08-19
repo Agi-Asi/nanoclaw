@@ -10,12 +10,11 @@
  * reason (so the channel genuinely would not register), this goes red. A structural
  * check of the import line would falsely pass in that second case.
  *
- * dial is a native adapter (no Chat SDK bridge): it uses the official `@getdial/sdk`
- * for outbound and Dial's CLI command-target (a spooled-event handler) for inbound.
- * Importing the barrel requires `@getdial/sdk` to be installed, which holds in a
- * composed install: the skill's `pnpm install` step runs before this test — so this
- * test also implicitly guards that dependency (an unmocked import throws if the
- * package is missing). Registration is a pure top-level call, and dial.ts opens the
+ * dial is a native adapter (no Chat SDK bridge): it POSTs Dial's documented
+ * `/api/v1/messages` endpoint for outbound and uses Dial's CLI command-target (a
+ * spooled-event handler) for inbound. It pulls in no Dial client library, so the
+ * barrel import needs nothing installed beyond the repo's own dependencies.
+ * Registration is a pure top-level call, and dial.ts opens the
  * spool watcher / shells out to the `dial` CLI only inside setup() (run at host
  * startup), never at import.
  */

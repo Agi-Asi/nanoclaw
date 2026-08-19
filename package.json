@@ -40,7 +40,6 @@
     "@chat-adapter/whatsapp": "4.29.0",
     "@clack/core": "^1.2.0",
     "@clack/prompts": "^1.2.0",
-    "@getdial/sdk": "0.21.0",
     "@onecli-sh/sdk": "2.2.1",
     "@resend/chat-sdk-adapter": "^0.1.1",
     "@types/qrcode": "^1.5.6",

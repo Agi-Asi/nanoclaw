@@ -59,7 +59,7 @@ import './whatsapp.js';
 // signal (native, no Chat SDK — signal-cli TCP JSON-RPC daemon)
 // import './signal.js';
 
-// dial (native, no Chat SDK — @getdial/sdk outbound + CLI command-target inbound)
+// dial (native, no Chat SDK — REST outbound + CLI command-target inbound)
 import './dial.js';
 
 // emacs (native HTTP bridge, no Chat SDK)

@@ -3,10 +3,10 @@ import path from 'path';
 
 /**
  * This install's identifier for third-party clients that accept a caller token
- * on their User-Agent — currently the Dial CLI (`DIAL_USER_AGENT`) and the Dial
- * SDK (`new DialClient({ userAgent })`), which prepend it to their own stock
- * token rather than replacing it. It lets an install name itself in Dial's
- * server-side request logs.
+ * on their User-Agent — the Dial CLI (`DIAL_USER_AGENT`), which prepends it to
+ * its own stock token rather than replacing it, and the adapter's outbound REST
+ * call, which sends it as the request's User-Agent. It lets an install name
+ * itself in Dial's server-side request logs.
  *
  * Never throws. The token is telemetry: a host that can't read its own version
  * must still be able to make the call, so an unreadable package.json degrades

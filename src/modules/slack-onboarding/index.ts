@@ -65,8 +65,8 @@ const WELCOME_PROMPTS: Array<{ title: string; message: string }> = [
 
 /** True when this DM already has a real conversation (a per-thread session
  *  with a ts segment) — the get-started prompts are then stale. */
-function dmHasConversation(mgId: string): boolean {
-  return getActiveSessions().some((s) => {
+async function dmHasConversation(mgId: string): Promise<boolean> {
+  return (await getActiveSessions()).some((s) => {
     if (s.messaging_group_id !== mgId || !s.thread_id) return false;
     const parts = s.thread_id.split(':');
     return parts.length >= 3 && parts[parts.length - 1] !== '';
@@ -85,11 +85,11 @@ export function clearWelcomePrompts(instanceKey: string, platformId: string): vo
 // DM — prompt sets made before the DM was ever opened may not render
 // (live-hit), and stale get-started buttons should retire once a real
 // conversation exists.
-setAgentDmOpenedHandler(({ channelId }) => {
+setAgentDmOpenedHandler(async ({ channelId }) => {
   const platformId = `slack:${channelId}`;
-  const mg = getMessagingGroupByPlatform('slack', platformId);
+  const mg = await getMessagingGroupByPlatform('slack', platformId);
   if (!mg || mg.is_group !== 0) return;
-  if (dmHasConversation(mg.id)) {
+  if (await dmHasConversation(mg.id)) {
     clearWelcomePrompts(mg.instance ?? mg.channel_type, platformId);
     return;
   }
@@ -98,14 +98,14 @@ setAgentDmOpenedHandler(({ channelId }) => {
     .catch(() => {});
 });
 
-function offerWelcomePrompts(msg: OutboundMessage): void {
+async function offerWelcomePrompts(msg: OutboundMessage): Promise<void> {
   try {
     const channelType = msg.channel_type;
     const platformId = msg.platform_id;
     if (!channelType || !platformId) return;
     const tidParts = (msg.thread_id ?? '').split(':');
     if (tidParts.length >= 3 && tidParts[tidParts.length - 1] !== '') return; // threaded → not the welcome
-    const mg = getMessagingGroupByPlatform(channelType, platformId);
+    const mg = await getMessagingGroupByPlatform(channelType, platformId);
     if (!mg || mg.is_group !== 0) return;
     void setSuggestedPrompts(mg.instance ?? channelType, platformId, WELCOME_PROMPTS, 'Get started')
       .then(() => log.info('Welcome prompts set', { platformId }))
@@ -118,8 +118,8 @@ function offerWelcomePrompts(msg: OutboundMessage): void {
 // Welcome notification follow-through: the FIRST delivery of an empty-thread
 // DM session (the welcome) pins the get-started suggested prompts. The hook
 // already scopes to user-facing rows (non-system, non-agent, non-task_log).
-registerPostDeliveryHook((msg, _session, { firstDelivery }) => {
-  if (firstDelivery) offerWelcomePrompts(msg);
+registerPostDeliveryHook(async (msg, _session, { firstDelivery }) => {
+  if (firstDelivery) await offerWelcomePrompts(msg);
 });
 
 function safeParseContent(raw: string): { text?: string; sender?: string; senderId?: string } {

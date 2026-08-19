@@ -71,10 +71,10 @@ function slackJson(body: Record<string, unknown>): Response {
 const fetchMock = vi.fn();
 let inDb: Database.Database;
 
-beforeEach(() => {
-  const db = initTestDb();
-  runMigrations(db);
-  createMessagingGroup(makeMg());
+beforeEach(async () => {
+  const db = await initTestDb();
+  await runMigrations(db);
+  await createMessagingGroup(makeMg());
   inDb = new Database(':memory:');
   inDb.exec(INBOUND_SCHEMA);
   fetchMock.mockReset();
@@ -82,29 +82,31 @@ beforeEach(() => {
   process.env.SLACK_BOT_TOKEN_PIXEL = 'xoxb-pixel-token';
 });
 
-afterEach(() => {
+afterEach(async () => {
   delete process.env.SLACK_BOT_TOKEN_PIXEL;
   vi.unstubAllGlobals();
   inDb.close();
-  closeDb();
+  await closeDb();
 });
 
 describe('resolveSessionBotToken', () => {
-  it('maps the mg instance to its .env token key', () => {
-    expect(resolveSessionBotToken(makeSession())).toEqual({ token: 'xoxb-pixel-token' });
+  it('maps the mg instance to its .env token key', async () => {
+    expect(await resolveSessionBotToken(makeSession())).toEqual({ token: 'xoxb-pixel-token' });
   });
 
-  it('errors (naming the key, not any value) when the token is absent', () => {
+  it('errors (naming the key, not any value) when the token is absent', async () => {
     delete process.env.SLACK_BOT_TOKEN_PIXEL;
-    const result = resolveSessionBotToken(makeSession());
+    const result = await resolveSessionBotToken(makeSession());
     expect(result).toHaveProperty('error');
     expect((result as { error: string }).error).toContain('SLACK_BOT_TOKEN_PIXEL');
   });
 
-  it('rejects sessions with no messaging group and non-Slack channels', () => {
-    expect(resolveSessionBotToken(makeSession(null))).toHaveProperty('error');
-    createMessagingGroup(makeMg({ id: 'mg-tg', channel_type: 'telegram', platform_id: 'tg:1', instance: 'telegram' }));
-    expect(resolveSessionBotToken({ ...makeSession(), messaging_group_id: 'mg-tg' })).toHaveProperty('error');
+  it('rejects sessions with no messaging group and non-Slack channels', async () => {
+    expect(await resolveSessionBotToken(makeSession(null))).toHaveProperty('error');
+    await createMessagingGroup(
+      makeMg({ id: 'mg-tg', channel_type: 'telegram', platform_id: 'tg:1', instance: 'telegram' }),
+    );
+    expect(await resolveSessionBotToken({ ...makeSession(), messaging_group_id: 'mg-tg' })).toHaveProperty('error');
   });
 });
 

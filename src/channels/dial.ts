@@ -372,18 +372,28 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
   }
 
   /**
-   * Best-effort: write the handler script and register it as a Dial CLI command
-   * target. Failures are logged, never thrown — the adapter keeps watching the
-   * spool, and the wizard/skill can establish this out of band.
+   * Write the handler script and register it as a Dial CLI command target.
+   * Returns true when the target is CONFIRMED registered.
+   *
+   * Still never throws, and the caller still connects on false, because a
+   * failure here does not mean the target is missing: the /add-dial skill runs
+   * `dial local-target add cmd` itself, so a working install can reach this code
+   * with the target already in place and only the re-assert failing. Blocking
+   * connect on false would take down a channel that receives fine — and would
+   * kill outbound with it, including the operator's own error notification.
+   *
+   * What false DOES mean is that nothing here verified inbound can route, so it
+   * is reported at error level and the connect line is stamped `unverified`
+   * rather than presenting as unqualified health.
    */
-  function ensureCommandTarget(): void {
+  function ensureCommandTarget(): boolean {
     try {
       fs.mkdirSync(path.dirname(handlerPath), { recursive: true });
       fs.writeFileSync(handlerPath, handlerScript(spoolDir), { mode: 0o755 });
       fs.chmodSync(handlerPath, 0o755);
     } catch (err) {
-      log.warn('Dial: could not write command-target handler', { handlerPath, err });
-      return;
+      log.error('Dial: could not write command-target handler — inbound will not route', { handlerPath, err });
+      return false;
     }
     const cliEnv = { ...process.env, DIAL_USER_AGENT: nanoclawUserAgent() };
     try {
@@ -400,11 +410,22 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
         });
         log.info('Dial: registered CLI command target', { handlerPath });
       }
+      return true;
     } catch (err) {
-      log.warn(
-        'Dial: could not register command target — check `dial` is on PATH (DIAL_CLI_PATH) and `dial listen install` has run',
-        { err },
+      // Two distinct failures land here, and the second is easy to miss: the
+      // `dial` binary is a `#!/usr/bin/env node` script, so an absolute
+      // DIAL_CLI_PATH fixes discovery but the shebang still needs `node` on the
+      // service's PATH. A service unit that hardcodes an absolute node path to
+      // start the host, yet omits that directory from PATH, turns ENOENT into
+      // `env: node: No such file or directory`. Both are named here so the log
+      // line is enough to fix either one.
+      log.error(
+        'Dial: could not register command target — inbound SMS and calls may not route. ' +
+          'Set DIAL_CLI_PATH to the absolute `dial` path, make sure the service PATH can resolve `node` ' +
+          '(the CLI is a node script), and check `dial listen install` has run.',
+        { cliPath: config.cliPath, err },
       );
+      return false;
     }
   }
 
@@ -418,7 +439,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       setup = cfg;
       ensureLinesAreGroups();
       fs.mkdirSync(spoolDir, { recursive: true });
-      ensureCommandTarget();
+      const commandTarget = ensureCommandTarget() ? 'ok' : 'unverified';
 
       drainSpool(); // anything spooled while we were down
       try {
@@ -429,7 +450,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       pollTimer = setInterval(drainSpool, 2000); // fallback — fs.watch misses events on some mounts
 
       connected = true;
-      log.info('Dial channel connected', { line: config.fromNumber || '(account default)' });
+      log.info('Dial channel connected', { line: config.fromNumber || '(account default)', commandTarget });
     },
 
     async teardown(): Promise<void> {

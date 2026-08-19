@@ -6,9 +6,16 @@ description: Add Slack channel integration via Chat SDK.
 # Add Slack Channel
 
 Adds Slack support via the Chat SDK bridge. Trunk ships no channels — this skill
-copies the Slack channel layer (adapter, host modules, container tool, container
-skills) in from the `channels` branch. The **Apply** steps carry `nc:` directive
-fences (an agent applies the prose, a parser the directives); all idempotent.
+copies the Slack channel layer (adapter, shared lib, bot-inbound guard,
+provisioning core, container skills) in from the `channels` branch. The **Apply**
+steps carry `nc:` directive fences (an agent applies the prose, a parser the
+directives); all idempotent.
+
+This is the base Slack experience: one bot, DM and channel chat. The Slack
+**agents** feature — child bots provisioned from `create_agent`, shared rooms,
+canvases, DM onboarding — ships separately in `/slack-a2a-rooms` +
+`/slack-agent-flow`; the setup wizard applies them automatically when run with
+`--slack-agents`, and they can be applied on top of this install at any time.
 
 ## Apply
 
@@ -23,39 +30,19 @@ src/channels/slack-a2a-guard.ts
 src/channels/slack-a2a-guard.test.ts
 src/channels/slack-registration.test.ts
 src/channels/slack-instances-registration.test.ts
-src/env-file.ts
-src/env-file.test.ts
 src/provisioning/slack-app.ts
 src/provisioning/slack-app.test.ts
-src/modules/slack-room-membership/index.ts
-src/modules/slack-room-membership/membership.ts
-src/modules/slack-room-membership/membership.test.ts
-src/modules/slack-room-membership/env-file.ts
-src/modules/slack-room-membership/env-file.test.ts
-src/modules/canvas-actions/index.ts
-src/modules/canvas-actions/handlers.ts
-src/modules/canvas-actions/canvas-api.ts
-src/modules/canvas-actions/canvas-actions.test.ts
-src/modules/slack-onboarding/index.ts
-src/modules/slack-onboarding/onboarding.test.ts
-src/modules/slack-onboarding/thread-title.test.ts
-container/agent-runner/src/mcp-tools/canvas.ts
-container/agent-runner/src/mcp-tools/canvas.instructions.md
-container/agent-runner/src/mcp-tools/canvas.test.ts
-container/skills/slack-construct/SKILL.md
-container/skills/slack-construct/instructions.md
-container/skills/canvas-work/SKILL.md
 container/skills/slack-formatting/SKILL.md
 container/skills/welcome/addenda/slack.md
-setup/channels/slack-companions.ts
 ```
 
 - **Adapter + shared lib** (`slack.ts`, `slack-lib.ts`): bridge registration, wiring defaults, conversation resolver, the native `SLACK_INSTANCES` loop — pinned by the two registration tests.
 - **Bot-inbound guard** (`slack-a2a-guard.ts`): drops bot-authored inbound at the bridge by default; feature skills register a narrower admission policy on its seam.
-- **Host modules**: `slack-room-membership/` (invite-to-room adoption, group-DM fork carry-over, detach on removal, owner-presence access rule), `canvas-actions/` + the container `canvas` tool + `canvas-work` (section-scoped canvas edits/reads via the session's own bot identity), `slack-onboarding/` (get-started prompts, per-thread DM titles); the `env-file.ts` copies are their dotenv plumbing.
 - **Provisioning core** (`src/provisioning/slack-app.ts`): manifest template, scope/event constants, and the broker + manager-token transports for creating a Slack app programmatically. Nothing on the adapter path imports it — the setup wizard's auto-provision pre-step and feature skills do.
-- **Container skills**: `slack-construct/` (standing room/canvas/access/DM-history rules — its `instructions.md` composes into each group's CLAUDE.md at spawn), `slack-formatting/` (mrkdwn syntax; synced to `~/.claude/skills`), `welcome/addenda/slack.md` (channel-matched welcome addendum — inert on hosts predating the mechanism).
-- **Companion declaration** (`slack-companions.ts`): the companion skills (`slack-a2a-rooms`) the channel install flow applies after this one.
+- **Container skills**: `slack-formatting/` (mrkdwn syntax; synced to `~/.claude/skills`), `welcome/addenda/slack.md` (channel-matched welcome addendum — inert on hosts predating the mechanism).
+
+The room/canvas/onboarding host modules and their container files are part of
+the agents feature and install with `/slack-agent-flow`, not here.
 
 ### 2. Register the payload
 
@@ -66,26 +53,6 @@ import './slack.js';
 ```
 ```nc:append to:src/channels/index.ts
 import './slack-a2a-guard.js';
-```
-
-The three host modules, in the modules barrel:
-```nc:append to:src/modules/index.ts
-import './slack-room-membership/index.js';
-import './canvas-actions/index.js';
-import './slack-onboarding/index.js';
-```
-
-The canvas tool, in the container tool barrel (mounted read-only — a host
-restart is enough, no image rebuild):
-```nc:append to:container/agent-runner/src/mcp-tools/index.ts
-import './canvas.js';
-```
-
-The companion declaration goes directly into the registry file (an import
-there would evaluate before the registry's own maps initialize):
-```nc:append to:setup/channels/companions.ts
-import { SLACK_COMPANION_SKILLS } from './slack-companions.js';
-registerCompanionSkills('slack', SLACK_COMPANION_SKILLS);
 ```
 
 ### 3. Install the adapter package
@@ -99,13 +66,12 @@ Pinned exactly — the supply-chain policy rejects ranges and `latest`:
 
 The build guards the typed `createChatSdkBridge(...)` call and proves the dependency
 installed; the tests pin registration (barrel import, dependency, the `SLACK_INSTANCES`
-loop) and the payload modules' behavior. The container canvas test is `bun:test`-only
-(`cd container/agent-runner && bun test src/mcp-tools/canvas.test.ts`) — optional here.
+loop), the guard, the shared lib, and the provisioning core.
 ```nc:run effect:build
 pnpm run build
 ```
 ```nc:run effect:test
-pnpm exec vitest run src/channels/slack-registration.test.ts src/channels/slack-instances-registration.test.ts src/channels/slack-lib.test.ts src/channels/slack-a2a-guard.test.ts src/modules/slack-room-membership src/modules/canvas-actions src/modules/slack-onboarding src/provisioning/slack-app.test.ts src/env-file.test.ts
+pnpm exec vitest run src/channels/slack-registration.test.ts src/channels/slack-instances-registration.test.ts src/channels/slack-lib.test.ts src/channels/slack-a2a-guard.test.ts src/provisioning/slack-app.test.ts
 ```
 
 ## Credentials
@@ -211,7 +177,10 @@ bash setup/lib/restart.sh
 ## Next Steps
 
 Mid-`/setup`: return to the setup flow. Otherwise wire the channel with `/init-first-agent`
-(or `/manage-channels`) and apply the companion skill (`/slack-a2a-rooms`).
+(or `/manage-channels`). For the Slack agents feature (child bots from
+`create_agent`, shared rooms, canvases), apply `/slack-a2a-rooms` then
+`/slack-agent-flow` — the setup wizard does both automatically when run with
+`--slack-agents`.
 
 ## Channel Info
 
@@ -229,4 +198,4 @@ Mid-`/setup`: return to the setup flow. Otherwise wire the channel with `/init-f
 - **`auth.test` fails, or `conversations.open` returns no channel.** A failing `auth.test` means the bot token is wrong or the app was never installed to the workspace. An empty `conversations.open` means the `im:write` scope is missing — add it and **reinstall the app**; scope changes only take effect after reinstall, which also mints a new `xoxb-` token to store.
 - **The greeting arrives but your replies vanish.** Sending works with just the bot token; *receiving* needs the event path. Socket Mode: the toggle on, `SLACK_APP_TOKEN` set with `connections:write`, and the bot events (`message.im`, `message.channels`, `message.groups`, `app_mention`) subscribed. Webhook: the Request URL must have passed Slack's challenge and the same events subscribed. Either way, App Home's Messages Tab must be enabled or Slack refuses DMs to the app.
 - **Adapter registered but Slack never connects.** Run `pnpm exec vitest run src/channels/slack-registration.test.ts` — red means the barrel import or the `@chat-adapter/slack` install drifted, so re-run the Apply steps. If green, restart the service (`bash setup/lib/restart.sh`) and check `logs/nanoclaw.error.log`.
-- **Rooms, canvases, or DM onboarding behave like a bare install.** Those live in the payload modules, not the adapter. Check that `src/modules/index.ts` carries the three Slack module imports and `container/agent-runner/src/mcp-tools/index.ts` imports `./canvas.js`, then restart — the Apply steps are idempotent, so re-running them is always safe. Standing instructions and the welcome addendum only reach sessions started after the restart.
+- **Rooms, canvases, or DM onboarding are missing.** Those are the agents feature, not this adapter install — they arrive with `/slack-a2a-rooms` + `/slack-agent-flow` (setup applies both when run with `--slack-agents`). If those skills were applied, check `src/modules/index.ts` carries their module imports, then restart.

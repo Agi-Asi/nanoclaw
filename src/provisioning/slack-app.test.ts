@@ -15,6 +15,7 @@ import {
   readInstallToken,
   readManagerToken,
   readServiceBase,
+  slackServiceForRegistry,
 } from './slack-app.js';
 
 interface ManifestShape {
@@ -97,29 +98,79 @@ describe('readManagerToken', () => {
   });
 });
 
-describe('readServiceBase', () => {
-  let dir: string | undefined;
-  afterEach(() => {
-    delete process.env.SLACK_SERVICE_BASE;
-    if (dir) fs.rmSync(dir, { recursive: true, force: true });
-    dir = undefined;
+describe('slackServiceForRegistry', () => {
+  it('swaps the host, keeping everything else about the deployment', () => {
+    expect(slackServiceForRegistry('https://registry.nanoclaw.dev')).toBe('https://slack.nanoclaw.dev');
+    expect(slackServiceForRegistry('https://registry.sandbox.nanoclaw.dev')).toBe('https://slack.sandbox.nanoclaw.dev');
+    expect(slackServiceForRegistry('http://registry.localhost:8080')).toBe('http://slack.localhost:8080');
   });
 
-  it('defaults to the deployed service', () => {
+  it('drops the path, query and userinfo a credential may have recorded', () => {
+    expect(slackServiceForRegistry('https://user:pw@registry.sandbox.nanoclaw.dev/private?token=secret')).toBe(
+      'https://slack.sandbox.nanoclaw.dev',
+    );
+  });
+
+  it('declines to guess for anything that is not a registry host', () => {
+    expect(slackServiceForRegistry(undefined)).toBeUndefined();
+    expect(slackServiceForRegistry('')).toBeUndefined();
+    expect(slackServiceForRegistry('not a url')).toBeUndefined();
+    expect(slackServiceForRegistry('file:///registry.nanoclaw.dev')).toBeUndefined();
+    // Same deployment, different naming: derive nothing rather than invent it.
+    expect(slackServiceForRegistry('https://accounts.example.test')).toBeUndefined();
+  });
+});
+
+describe('readServiceBase', () => {
+  let dir: string | undefined;
+  let configDir: string | undefined;
+
+  /** An isolated pair of directories: never the developer's own credential. */
+  function dirs(accountApi?: string): [string, string] {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-'));
-    expect(readServiceBase(dir)).toBe(DEFAULT_SLACK_SERVICE_BASE);
+    configDir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-cfg-'));
+    if (accountApi !== undefined) {
+      fs.writeFileSync(path.join(configDir, 'account.json'), JSON.stringify({ api: accountApi, token: 'nct_x' }));
+    }
+    return [dir, configDir];
+  }
+
+  afterEach(() => {
+    delete process.env.SLACK_SERVICE_BASE;
+    for (const d of [dir, configDir]) if (d) fs.rmSync(d, { recursive: true, force: true });
+    dir = configDir = undefined;
+  });
+
+  it('defaults to the deployed service when nothing says otherwise', () => {
+    expect(readServiceBase(...dirs())).toBe(DEFAULT_SLACK_SERVICE_BASE);
   });
 
   it('prefers process env and strips trailing slashes', () => {
     process.env.SLACK_SERVICE_BASE = 'https://slack-sandbox.example.dev/';
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-'));
-    expect(readServiceBase(dir)).toBe('https://slack-sandbox.example.dev');
+    expect(readServiceBase(...dirs())).toBe('https://slack-sandbox.example.dev');
   });
 
   it('reads from .env, stripping quotes', () => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'slack-prov-'));
-    fs.writeFileSync(path.join(dir, '.env'), 'SLACK_SERVICE_BASE="https://broker.example.test"\n');
-    expect(readServiceBase(dir)).toBe('https://broker.example.test');
+    const [root, cfg] = dirs();
+    fs.writeFileSync(path.join(root, '.env'), 'SLACK_SERVICE_BASE="https://broker.example.test"\n');
+    expect(readServiceBase(root, cfg)).toBe('https://broker.example.test');
+  });
+
+  it('follows the credential to its own deployment rather than the default', () => {
+    expect(readServiceBase(...dirs('https://registry.sandbox.nanoclaw.dev'))).toBe(
+      'https://slack.sandbox.nanoclaw.dev',
+    );
+  });
+
+  it('lets an explicit setting override the credential it was issued against', () => {
+    process.env.SLACK_SERVICE_BASE = 'https://slack.example.test';
+    expect(readServiceBase(...dirs('https://registry.sandbox.nanoclaw.dev'))).toBe('https://slack.example.test');
+  });
+
+  it('falls back to the default when the credential records nothing to derive from', () => {
+    expect(readServiceBase(...dirs('https://accounts.example.test'))).toBe(DEFAULT_SLACK_SERVICE_BASE);
+    for (const d of [dir, configDir]) if (d) fs.rmSync(d, { recursive: true, force: true });
+    expect(readServiceBase(...dirs())).toBe(DEFAULT_SLACK_SERVICE_BASE);
   });
 });
 

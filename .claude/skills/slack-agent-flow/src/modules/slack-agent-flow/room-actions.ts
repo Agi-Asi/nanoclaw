@@ -33,7 +33,7 @@ import {
   getMessagingGroupsByAgentGroup,
 } from '../../db/messaging-groups.js';
 import { log } from '../../log.js';
-import type { AgentGroup, Session } from '../../types.js';
+import type { AgentGroup, MessagingGroup, Session } from '../../types.js';
 import {
   getDestinationByName,
   getDestinationByTarget,
@@ -58,16 +58,16 @@ interface ResolvedParticipant extends RoomParticipant {
  * An agent name → its agent group, through the CALLER's destination
  * namespace (normalizeName'd, same as send_message targets).
  */
-function resolveAgentByName(callerGroupId: string, name: string): AgentGroup {
+async function resolveAgentByName(callerGroupId: string, name: string): Promise<AgentGroup> {
   const localName = normalizeName(name);
-  const dest = getDestinationByName(callerGroupId, localName);
+  const dest = await getDestinationByName(callerGroupId, localName);
   if (!dest || dest.target_type !== 'agent') {
     throw new RoomActionError(
       `unknown agent "${name}" — you have no agent destination named "${localName}". ` +
         `Use the names your send_message destinations use.`,
     );
   }
-  const group = getAgentGroup(dest.target_id);
+  const group = await getAgentGroup(dest.target_id);
   if (!group) throw new RoomActionError(`agent group behind destination "${localName}" no longer exists`);
   return group;
 }
@@ -107,7 +107,7 @@ async function participantForInstance(
 async function participantForAgentGroup(group: AgentGroup, rootDir: string): Promise<ResolvedParticipant> {
   const instances = [
     ...new Set(
-      getMessagingGroupsByAgentGroup(group.id)
+      (await getMessagingGroupsByAgentGroup(group.id))
         .filter((mg) => mg.channel_type === 'slack')
         .map((mg) => mg.instance ?? 'slack'),
     ),
@@ -132,9 +132,9 @@ async function participantForAgentGroup(group: AgentGroup, rootDir: string): Pro
  * else resolved from its wired messaging groups (task/a2a sessions).
  */
 async function callerParticipant(session: Session, rootDir: string): Promise<ResolvedParticipant> {
-  const group = getAgentGroup(session.agent_group_id);
+  const group = await getAgentGroup(session.agent_group_id);
   if (!group) throw new RoomActionError('source agent group not found');
-  const originMg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
+  const originMg = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : undefined;
   if (originMg?.channel_type === 'slack') {
     return participantForInstance(group, originMg.instance ?? 'slack', rootDir);
   }
@@ -142,14 +142,14 @@ async function callerParticipant(session: Session, rootDir: string): Promise<Res
 }
 
 /** The caller's local destination name for a room channel on its instance. */
-function callerRoomDestination(
+async function callerRoomDestination(
   callerGroupId: string,
   callerInstanceKey: string,
   roomChannelId: string,
   roomName: string,
-): string {
-  const roomMg = getMessagingGroupByPlatform('slack', `slack:${roomChannelId}`, callerInstanceKey);
-  const dest = roomMg ? getDestinationByTarget(callerGroupId, 'channel', roomMg.id) : undefined;
+): Promise<string> {
+  const roomMg = await getMessagingGroupByPlatform('slack', `slack:${roomChannelId}`, callerInstanceKey);
+  const dest = roomMg ? await getDestinationByTarget(callerGroupId, 'channel', roomMg.id) : undefined;
   return dest?.local_name ?? normalizeName(roomName);
 }
 
@@ -164,19 +164,19 @@ function mentionTags(participants: RoomParticipant[], excludeGroupId: string): s
 // ── create_room ──
 
 /** Guard precheck: malformed requests are answered without ever creating a hold. */
-export function validateCreateRoom(content: Record<string, unknown>, session: Session): boolean {
+export async function validateCreateRoom(content: Record<string, unknown>, session: Session): Promise<boolean> {
   const name = typeof content.name === 'string' ? content.name.trim() : '';
   if (!name) {
-    notifyAgent(session, 'create_room failed: name is required.');
+    await notifyAgent(session, 'create_room failed: name is required.');
     return false;
   }
   const agents = Array.isArray(content.agents) ? content.agents : [];
   if (agents.length === 0 || !agents.every((a) => typeof a === 'string' && a.trim())) {
-    notifyAgent(session, 'create_room failed: agents must be a non-empty list of agent names.');
+    await notifyAgent(session, 'create_room failed: agents must be a non-empty list of agent names.');
     return false;
   }
-  if (!getAgentGroup(session.agent_group_id)) {
-    notifyAgent(session, 'create_room failed: source agent group not found.');
+  if (!(await getAgentGroup(session.agent_group_id))) {
+    await notifyAgent(session, 'create_room failed: source agent group not found.');
     return false;
   }
   return true;
@@ -184,7 +184,7 @@ export function validateCreateRoom(content: Record<string, unknown>, session: Se
 
 /** Guard hold: card the requesting group's admin chain. */
 export async function requestCreateRoomHold(content: Record<string, unknown>, session: Session): Promise<void> {
-  const sourceGroup = getAgentGroup(session.agent_group_id);
+  const sourceGroup = await getAgentGroup(session.agent_group_id);
   if (!sourceGroup) return;
   const name = typeof content.name === 'string' ? content.name.trim() : '';
   const agents = (Array.isArray(content.agents) ? content.agents : []).filter(
@@ -224,7 +224,7 @@ export async function handleCreateRoom(content: Record<string, unknown>, session
   const rootDir = process.cwd();
 
   try {
-    const operatorUserId = resolveOperatorSlackUserId(session.agent_group_id);
+    const operatorUserId = await resolveOperatorSlackUserId(session.agent_group_id);
     if (!operatorUserId) {
       throw new RoomActionError(
         'no approver with a Slack identity (slack:U…) found in user_roles — grant one with `ncl roles grant` and retry',
@@ -241,7 +241,7 @@ export async function handleCreateRoom(content: Record<string, unknown>, session
       participants.push(caller);
     }
     for (const agentName of agentNames) {
-      const group = resolveAgentByName(session.agent_group_id, agentName);
+      const group = await resolveAgentByName(session.agent_group_id, agentName);
       if (seen.has(group.id)) continue;
       seen.add(group.id);
       participants.push(await participantForAgentGroup(group, rootDir));
@@ -261,17 +261,17 @@ export async function handleCreateRoom(content: Record<string, unknown>, session
 
     const memberNames = participants.map((p) => p.agentGroupName).join(', ');
     if (!includeMe) {
-      notifyAgent(
+      await notifyAgent(
         session,
         `Room "${name}" is live (${roomChannelId}) with the operator and ${memberNames}. ` +
           `You are not a member (include_me was false), so you cannot post there.`,
       );
     } else if (!created) {
-      notifyAgent(session, `Room "${name}" already existed (${roomChannelId}) — nothing new was created.`);
+      await notifyAgent(session, `Room "${name}" already existed (${roomChannelId}) — nothing new was created.`);
     } else {
       // The calling agent authors the intro, in its own voice.
-      const roomDest = callerRoomDestination(session.agent_group_id, creator.instanceKey, roomChannelId, name);
-      notifyAgent(
+      const roomDest = await callerRoomDestination(session.agent_group_id, creator.instanceKey, roomChannelId, name);
+      await notifyAgent(
         session,
         `Room "${name}" is live (${roomChannelId}) with you, the operator, and ${memberNames}. ` +
           `Post a brief introduction there now via send_message({ to: "${roomDest}", ... }): ` +
@@ -283,7 +283,7 @@ export async function handleCreateRoom(content: Record<string, unknown>, session
     log.info('create_room completed', { roomChannelId, created, participantCount: participants.length });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    notifyAgent(session, `create_room failed: ${message}`);
+    await notifyAgent(session, `create_room failed: ${message}`);
     log.error('create_room failed', { name, err: message });
   }
 }
@@ -291,17 +291,17 @@ export async function handleCreateRoom(content: Record<string, unknown>, session
 // ── add_to_room ──
 
 /** Guard precheck: malformed requests are answered without ever creating a hold. */
-export function validateAddToRoom(content: Record<string, unknown>, session: Session): boolean {
+export async function validateAddToRoom(content: Record<string, unknown>, session: Session): Promise<boolean> {
   if (typeof content.room !== 'string' || !content.room.trim()) {
-    notifyAgent(session, 'add_to_room failed: room is required.');
+    await notifyAgent(session, 'add_to_room failed: room is required.');
     return false;
   }
   if (typeof content.agent !== 'string' || !content.agent.trim()) {
-    notifyAgent(session, 'add_to_room failed: agent is required.');
+    await notifyAgent(session, 'add_to_room failed: agent is required.');
     return false;
   }
-  if (!getAgentGroup(session.agent_group_id)) {
-    notifyAgent(session, 'add_to_room failed: source agent group not found.');
+  if (!(await getAgentGroup(session.agent_group_id))) {
+    await notifyAgent(session, 'add_to_room failed: source agent group not found.');
     return false;
   }
   return true;
@@ -309,7 +309,7 @@ export function validateAddToRoom(content: Record<string, unknown>, session: Ses
 
 /** Guard hold: card the requesting group's admin chain. */
 export async function requestAddToRoomHold(content: Record<string, unknown>, session: Session): Promise<void> {
-  const sourceGroup = getAgentGroup(session.agent_group_id);
+  const sourceGroup = await getAgentGroup(session.agent_group_id);
   if (!sourceGroup) return;
   const room = typeof content.room === 'string' ? content.room.trim() : '';
   const agent = typeof content.agent === 'string' ? content.agent.trim() : '';
@@ -334,17 +334,21 @@ export async function requestAddToRoomHold(content: Record<string, unknown>, ses
  * under the same name), the NEWEST family wins — "the room" means its latest
  * incarnation.
  */
-function resolveRoomFamily(roomName: string): { family: ReturnType<typeof getAllMessagingGroups>; name: string } {
+async function resolveRoomFamily(roomName: string): Promise<{ family: MessagingGroup[]; name: string }> {
   const wanted = roomName.trim().toLowerCase();
-  const matches = getAllMessagingGroups().filter(
-    (m) =>
+  const matches: MessagingGroup[] = [];
+  for (const m of await getAllMessagingGroups()) {
+    if (
       m.channel_type === 'slack' &&
       m.is_group === 1 &&
       !m.denied_at &&
       m.platform_id.startsWith('slack:') &&
       (m.name ?? '').trim().toLowerCase() === wanted &&
-      getMessagingGroupAgents(m.id).length > 0,
-  );
+      (await getMessagingGroupAgents(m.id)).length > 0
+    ) {
+      matches.push(m);
+    }
+  }
   if (matches.length === 0) throw new RoomActionError(`no wired Slack room named "${roomName}" found`);
   const newestFirst = [...new Set(matches.map((m) => m.platform_id))]
     .map((pid) => ({
@@ -373,14 +377,14 @@ export async function handleAddToRoom(content: Record<string, unknown>, session:
   const rootDir = process.cwd();
 
   try {
-    const operatorUserId = resolveOperatorSlackUserId(session.agent_group_id);
+    const operatorUserId = await resolveOperatorSlackUserId(session.agent_group_id);
     if (!operatorUserId) {
       throw new RoomActionError(
         'no approver with a Slack identity (slack:U…) found in user_roles — grant one with `ncl roles grant` and retry',
       );
     }
 
-    const { family, name: roomName } = resolveRoomFamily(roomArg);
+    const { family, name: roomName } = await resolveRoomFamily(roomArg);
 
     // Current participants — one per wired agent group, on the room row's
     // own instance (router lookup is exact-on-instance, so the row is the
@@ -388,18 +392,18 @@ export async function handleAddToRoom(content: Record<string, unknown>, session:
     const participants: ResolvedParticipant[] = [];
     const seen = new Set<string>();
     for (const mg of family) {
-      for (const wiring of getMessagingGroupAgents(mg.id)) {
+      for (const wiring of await getMessagingGroupAgents(mg.id)) {
         if (seen.has(wiring.agent_group_id)) continue;
         seen.add(wiring.agent_group_id);
-        const group = getAgentGroup(wiring.agent_group_id);
+        const group = await getAgentGroup(wiring.agent_group_id);
         if (!group) continue;
         participants.push(await participantForInstance(group, mg.instance ?? 'slack', rootDir));
       }
     }
 
-    const newGroup = resolveAgentByName(session.agent_group_id, agentArg);
+    const newGroup = await resolveAgentByName(session.agent_group_id, agentArg);
     if (seen.has(newGroup.id)) {
-      notifyAgent(session, `add_to_room: agent "${newGroup.name}" is already in room "${roomName}".`);
+      await notifyAgent(session, `add_to_room: agent "${newGroup.name}" is already in room "${roomName}".`);
       return;
     }
     const newParticipant = await participantForAgentGroup(newGroup, rootDir);
@@ -431,17 +435,24 @@ export async function handleAddToRoom(content: Record<string, unknown>, session:
     });
 
     const callerInRoom = seen.has(session.agent_group_id);
-    const callerMg = family.find((mg) =>
-      getMessagingGroupAgents(mg.id).some((w) => w.agent_group_id === session.agent_group_id),
-    );
+    let callerMg: MessagingGroup | undefined;
+    for (const mg of family) {
+      if ((await getMessagingGroupAgents(mg.id)).some((w) => w.agent_group_id === session.agent_group_id)) {
+        callerMg = mg;
+        break;
+      }
+    }
+    const roomDestination = callerMg
+      ? await callerRoomDestination(session.agent_group_id, callerMg.instance ?? 'slack', roomChannelId, roomName)
+      : undefined;
     const intro =
       callerInRoom && callerMg
         ? ` Post a brief introduction of ${newParticipant.agentGroupName} there now via send_message({ to: ` +
-          `"${callerRoomDestination(session.agent_group_id, callerMg.instance ?? 'slack', roomChannelId, roomName)}", ... }): ` +
+          `"${roomDestination}", ... }): ` +
           `1-2 lines in your own voice, tagging them with <@${newParticipant.botUserId}> (include that literally — ` +
           `it renders as a mention). Just the intro — no mechanics, no member lists.`
         : '';
-    notifyAgent(
+    await notifyAgent(
       session,
       `${newParticipant.agentGroupName} was added to room "${roomName}". Slack group DMs never grow in place, ` +
         `so the room moved to a new conversation (${roomChannelId}) — everyone is wired there and the old ` +
@@ -450,7 +461,7 @@ export async function handleAddToRoom(content: Record<string, unknown>, session:
     log.info('add_to_room completed', { roomChannelId, agentGroupId: newGroup.id });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    notifyAgent(session, `add_to_room failed: ${message}`);
+    await notifyAgent(session, `add_to_room failed: ${message}`);
     log.error('add_to_room failed', { room: roomArg, agent: agentArg, err: message });
   }
 }

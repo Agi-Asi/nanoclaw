@@ -16,9 +16,9 @@ import { ALLOW, DENY, HOLD, defineGuardedAction, type GuardedAction } from '../.
 import type { GuardDecision, GuardInput } from '../../guard/index.js';
 
 /** The agents.create trust split, reused verbatim for the room actions. */
-function decideByCliScope(input: GuardInput, action: string): GuardDecision {
+async function decideByCliScope(input: GuardInput, action: string): Promise<GuardDecision> {
   if (input.actor.kind !== 'agent') return DENY(`${action} is a container-originated action.`);
-  const cliScope = getContainerConfig(input.actor.agentGroupId)?.cli_scope ?? 'group';
+  const cliScope = (await getContainerConfig(input.actor.agentGroupId))?.cli_scope ?? 'group';
   if (cliScope === 'global') {
     // Trusted owner agent group — an approval tap on every room change would
     // be needless friction.

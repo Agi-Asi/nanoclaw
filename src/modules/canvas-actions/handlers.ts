@@ -51,11 +51,11 @@ type CanvasEditOp = (typeof CANVAS_EDIT_OPS)[number];
  * The session's own Slack bot token: session → mg → instance → .env.
  * Error strings are agent-facing — they name the key, never the value.
  */
-export function resolveSessionBotToken(session: Session): { token: string } | { error: string } {
+export async function resolveSessionBotToken(session: Session): Promise<{ token: string } | { error: string }> {
   if (!session.messaging_group_id) {
     return { error: 'session has no messaging group — cannot resolve a Slack bot identity' };
   }
-  const mg = getMessagingGroup(session.messaging_group_id);
+  const mg = await getMessagingGroup(session.messaging_group_id);
   if (!mg) {
     return { error: `messaging group ${session.messaging_group_id} not found` };
   }
@@ -186,7 +186,7 @@ export async function handleCanvasEdit(
     return;
   }
 
-  const auth = resolveSessionBotToken(session);
+  const auth = await resolveSessionBotToken(session);
   if ('error' in auth) {
     fail(auth.error);
     return;
@@ -345,7 +345,7 @@ export async function handleCanvasRead(
     return;
   }
 
-  const auth = resolveSessionBotToken(session);
+  const auth = await resolveSessionBotToken(session);
   if ('error' in auth) {
     respond('error', { error: auth.error });
     return;

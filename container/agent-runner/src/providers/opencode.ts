@@ -861,7 +861,12 @@ export class OpenCodeProvider implements AgentProvider {
     const pending: Array<{
       text: string;
       attachments?: OpenCodePromptAttachment[];
-      allowEmptyResumeFallback: boolean;
+      // The unwrapped prompt, set only on an opening turn that resumed a
+      // persisted continuation. Its presence is what licenses the empty-resume
+      // fallback; its value is what the replay re-composes from, so the
+      // replacement session gets the same prompt shape a first-time session
+      // would have got instead of a second <system> block stacked on the first.
+      replayPrompt?: string;
     }> = [];
     let waiting: (() => void) | null = null;
     let ended = false;
@@ -883,7 +888,7 @@ export class OpenCodeProvider implements AgentProvider {
     pending.push({
       text: wrapPromptWithContext(input.prompt, memory.openingInstructions(systemInstructions)),
       attachments: openingAttachments,
-      allowEmptyResumeFallback: Boolean(input.continuation),
+      replayPrompt: input.continuation ? input.prompt : undefined,
     });
 
     const kick = (): void => {
@@ -910,7 +915,7 @@ export class OpenCodeProvider implements AgentProvider {
         if (aborted) return;
         if (pending.length === 0 && ended) return;
 
-        const { text, attachments, allowEmptyResumeFallback } = pending.shift()!;
+        const { text, attachments, replayPrompt } = pending.shift()!;
         let sessionId = self.activeSessionId;
 
         if (!sessionId) {
@@ -945,6 +950,10 @@ export class OpenCodeProvider implements AgentProvider {
           const partTextByMessageId = new Map<string, string>();
           const roleByMessageId = new Map<string, string>();
           const partMessageIds = new Set<string>();
+          const erroredMessageIds = new Set<string>();
+          // Set only by signals that have no message record of their own
+          // (permissions, questions, compaction). Message-derived work is
+          // decided once, after the turn, in the loop below.
           let sawAssistantWork = false;
           let lastEventAt = Date.now();
           let eventTimedOut = false;
@@ -977,13 +986,15 @@ export class OpenCodeProvider implements AgentProvider {
 
               switch (ev.type) {
                 case 'message.updated': {
-                  const info = ev.properties.info as { id?: string; role?: string; sessionID?: string } | undefined;
+                  const info = ev.properties.info as
+                    | { id?: string; role?: string; sessionID?: string; error?: unknown }
+                    | undefined;
                   if (info?.sessionID && info.sessionID !== turnSessionId) break;
                   if (info?.id && info?.role) {
                     roleByMessageId.set(info.id, info.role);
-                    if (info.role === 'assistant' && partMessageIds.has(info.id)) {
-                      sawAssistantWork = true;
-                    }
+                    // `message.updated` fires repeatedly for the same record, so
+                    // latch the error rather than reading the last event only.
+                    if (info.error) erroredMessageIds.add(info.id);
                   }
                   break;
                 }
@@ -996,9 +1007,6 @@ export class OpenCodeProvider implements AgentProvider {
                     partMessageIds.add(part.messageID);
                     if (part.type === 'text' && part.text) {
                       partTextByMessageId.set(part.messageID, part.text);
-                    }
-                    if (roleByMessageId.get(part.messageID) === 'assistant') {
-                      sawAssistantWork = true;
                     }
                   }
                   break;
@@ -1076,10 +1084,18 @@ export class OpenCodeProvider implements AgentProvider {
 
           let resultText = '';
           for (const [msgId, role] of roleByMessageId) {
-            if (role === 'assistant') {
+            if (role !== 'assistant') continue;
+            // The bare envelope is the quiet-idle signature. OpenCode opens the
+            // assistant record when the turn starts (`AssistantMessage.time` has
+            // a required `created` and an optional `completed`), so the record
+            // existing proves nothing on its own. Work means it produced at
+            // least one part — or that it carries a provider error, which marks
+            // a live session whose turn failed: replaying that on a fresh
+            // session would discard the history and bury the error.
+            if (partMessageIds.has(msgId) || erroredMessageIds.has(msgId)) {
               sawAssistantWork = true;
-              resultText = partTextByMessageId.get(msgId) ?? resultText;
             }
+            resultText = partTextByMessageId.get(msgId) ?? resultText;
           }
           return { resultText, sawAssistantWork };
         }
@@ -1089,7 +1105,7 @@ export class OpenCodeProvider implements AgentProvider {
 
         if (
           isEmptyOpenCodeResume({
-            resumedExistingSession: allowEmptyResumeFallback,
+            resumedExistingSession: replayPrompt !== undefined,
             alreadyFellBack: emptyResumeFellBack,
             sawAssistantWork: outcome.sawAssistantWork,
           })
@@ -1108,8 +1124,12 @@ export class OpenCodeProvider implements AgentProvider {
           self.activeSessionId = freshId;
           yield { type: 'init', continuation: freshId };
           initYielded = true;
-          const memory = runMemorySessionHook(self.memorySessionHook, 'startup');
-          const retryText = memory ? wrapPromptWithContext(text, memory) : text;
+          // Compose the replay the way a first-time query composes an opening
+          // prompt — one <system> block carrying memory and the instructions —
+          // rather than wrapping the already-wrapped resume text a second time.
+          // `replayPrompt` is defined here: it is what licensed this branch.
+          const freshMemory = createMemoryLifecycle(self.memorySessionHook, false);
+          const retryText = wrapPromptWithContext(replayPrompt!, freshMemory.openingInstructions(systemInstructions));
           outcome = yield* runTurn(freshId, retryText, attachments);
           if (aborted) return;
         }
@@ -1128,7 +1148,6 @@ export class OpenCodeProvider implements AgentProvider {
         pending.push({
           text: wrapPromptWithContext(memory.pushPrefix(justCompacted) + compaction.apply(message), systemInstructions),
           attachments,
-          allowEmptyResumeFallback: false,
         });
         kick();
       },

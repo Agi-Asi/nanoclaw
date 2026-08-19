@@ -1,62 +1,88 @@
 import fs from 'fs';
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The adapter shells out to the `dial` CLI to send. Intercept execFile so the
+// test asserts the exact argv and env handed to it, with no process spawned.
+const spawns: Array<{ file: string; args: string[]; opts: Record<string, unknown> }> = [];
+let cliResult: { stdout: string } | Error = { stdout: JSON.stringify({ ok: true, message: { id: 'msg_1' } }) };
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  const execFile = (file: string, args: string[], opts: Record<string, unknown>, cb?: unknown) => {
+    spawns.push({ file, args, opts });
+    const done = cb as ((e: Error | null, r?: { stdout: string }) => void) | undefined;
+    if (cliResult instanceof Error) done?.(cliResult);
+    else done?.(null, cliResult);
+    return undefined as never;
+  };
+  // promisify(execFile) reads this symbol to build the promise-returning form.
+  (execFile as unknown as Record<symbol, unknown>)[Symbol.for('nodejs.util.promisify.custom')] = (
+    file: string,
+    args: string[],
+    opts: Record<string, unknown>,
+  ) => {
+    spawns.push({ file, args, opts });
+    return cliResult instanceof Error ? Promise.reject(cliResult) : Promise.resolve(cliResult);
+  };
+  return { ...actual, execFile };
+});
 
 import type { OutboundMessage } from './adapter.js';
 import { createDialAdapter } from './dial.js';
 import { nanoclawUserAgent } from './dial-user-agent.js';
 
-/** Send one reply through the adapter and hand back the intercepted request. */
-async function captureSend(): Promise<{ url: string; init: RequestInit }> {
-  const calls: Array<{ url: string; init: RequestInit }> = [];
-  vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    calls.push({ url: String(input), init: init ?? {} });
-    return new Response(JSON.stringify({ message: { id: 'msg_1' } }), {
-      status: 201,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  });
-  const adapter = createDialAdapter({ apiKey: 'sk_live_test', fromNumber: '+14155550123', cliPath: 'dial' });
+/** Send one reply through the adapter and hand back the intercepted spawn. */
+async function captureSend(): Promise<{ file: string; args: string[]; opts: Record<string, unknown> }> {
+  spawns.length = 0;
+  const adapter = createDialAdapter({ apiKey: 'sk_live_test', fromNumber: '+14155550123', cliPath: '/usr/bin/dial' });
   await adapter.deliver('+14155550123', '+15557654321', { content: 'hi' } as unknown as OutboundMessage);
-  expect(calls).toHaveLength(1);
-  return calls[0];
+  const sends = spawns.filter((s) => s.args[0] === 'message');
+  expect(sends).toHaveLength(1);
+  return sends[0];
 }
 
-describe('Dial adapter client identification', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
+describe('Dial adapter outbound send', () => {
+  beforeEach(() => {
+    cliResult = { stdout: JSON.stringify({ ok: true, message: { id: 'msg_1' } }) };
   });
 
-  it('sends the NanoClaw user-agent token on the outbound request', async () => {
-    const { init } = await captureSend();
-    const headers = init.headers as Record<string, string>;
-    expect(headers['User-Agent']).toBe(nanoclawUserAgent());
-    expect(headers['User-Agent']).toMatch(/^nanoclaw\//);
+  it('passes the NanoClaw user-agent token to the CLI', async () => {
+    const { opts } = await captureSend();
+    const env = opts.env as Record<string, string>;
+    expect(env.DIAL_USER_AGENT).toBe(nanoclawUserAgent());
+    expect(env.DIAL_USER_AGENT).toMatch(/^nanoclaw\//);
   });
 
-  it('carries the API key as a bearer token alongside it', async () => {
-    const { init } = await captureSend();
-    const headers = init.headers as Record<string, string>;
-    expect(headers.Authorization).toBe('Bearer sk_live_test');
+  it('invokes the resolved CLI path with the documented send arguments', async () => {
+    const { file, args } = await captureSend();
+    expect(file).toBe('/usr/bin/dial');
+    expect(args).toEqual([
+      'message',
+      '--to',
+      '+15557654321',
+      '--body',
+      'hi',
+      '--json',
+      '--from-number',
+      '+14155550123',
+    ]);
   });
 
-  it('posts to the documented messages endpoint with the reply payload', async () => {
-    const { url, init } = await captureSend();
-    expect(url).toBe('https://api.getdial.ai/api/v1/messages');
-    expect(init.method).toBe('POST');
-    expect(JSON.parse(init.body as string)).toEqual({
-      to: '+15557654321',
-      body: 'hi',
-      fromNumber: '+14155550123',
-    });
-  });
-
-  it('throws on a non-2xx so the send lands on the delivery retry path', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('nope', { status: 500 }));
-    const adapter = createDialAdapter({ apiKey: 'sk_live_test', fromNumber: '+14155550123', cliPath: 'dial' });
+  it('rejects when the CLI exits non-zero so the send lands on the retry path', async () => {
+    cliResult = new Error('Command failed: dial message');
+    const adapter = createDialAdapter({ apiKey: 'sk_live_test', fromNumber: '+14155550123', cliPath: '/usr/bin/dial' });
     await expect(
       adapter.deliver('+14155550123', '+15557654321', { content: 'hi' } as unknown as OutboundMessage),
-    ).rejects.toThrow(/Dial API error 500/);
+    ).rejects.toThrow(/Command failed/);
+  });
+
+  it('rejects when the CLI reports ok:false rather than reporting a delivery', async () => {
+    cliResult = { stdout: JSON.stringify({ ok: false, error: 'nope' }) };
+    const adapter = createDialAdapter({ apiKey: 'sk_live_test', fromNumber: '+14155550123', cliPath: '/usr/bin/dial' });
+    await expect(
+      adapter.deliver('+14155550123', '+15557654321', { content: 'hi' } as unknown as OutboundMessage),
+    ).rejects.toThrow(/failed send/);
   });
 });
 

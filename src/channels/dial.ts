@@ -4,10 +4,12 @@
  * Dial (https://getdial.ai) gives an agent a real phone number — SMS and
  * AI-handled voice calls. Native adapter (no Chat SDK bridge).
  *
- *   - Outbound SMS via a direct POST to Dial's documented REST endpoint
- *     (`POST /api/v1/messages`). Deliberately not the `@getdial/sdk` client:
- *     the adapter needs exactly this one call, and the SDK's `pubnub`
- *     dependency drags react-native, Metro and Hermes into the lockfile.
+ *   - Outbound SMS by shelling out to the `dial` CLI (`dial message --json`),
+ *     which is already a hard requirement for inbound. Deliberately not the
+ *     `@getdial/sdk` client (its `pubnub` dependency drags react-native, Metro
+ *     and Hermes into the lockfile for one call) and deliberately not a raw
+ *     REST call: the CLI ships in lockstep with the API, so a contract change
+ *     arrives with a CLI release instead of breaking a pinned request here.
  *   - Inbound via Dial's documented CLI command-target
  *     (docs.getdial.ai/integrations/agent-clients/nanoclaw): the `dial listen`
  *     daemon runs a spool handler per event; the adapter watches the spool
@@ -30,10 +32,11 @@
  * Credentials come from Dial's auth file (written by `dial onboard`). If
  * there's no key the factory returns null and the channel is skipped.
  */
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 
 import type { ChannelAdapter, ChannelDefaults, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
 import { registerChannelAdapter } from './channel-registry.js';
@@ -61,8 +64,10 @@ export function recordPairingCandidate(fromNumber: string, at: string = new Date
 /** Longest SMS body sent in one shot; longer text is chunked. */
 const MAX_CHUNK = 1500;
 
-/** Dial's REST base. Matches the SDK's own default; override for a self-hosted API. */
-const DIAL_API_BASE_URL = process.env.DIAL_API_BASE_URL || 'https://api.getdial.ai';
+const execFileAsync = promisify(execFile);
+
+/** Ceiling for one outbound send; the delivery layer retries a rejection. */
+const SEND_TIMEOUT_MS = 30_000;
 
 /** Dedup window — the listen daemon retries a failed handler invocation once. */
 const DEDUP_TTL_MS = 5 * 60_000;
@@ -76,6 +81,12 @@ interface DialEventEnvelope {
 }
 
 interface DialConfig {
+  /**
+   * Presence signal only — proof the host is signed in, which is what gates the
+   * channel starting at all. The adapter never sends it: the CLI authenticates
+   * itself from the same auth file this value was read out of, so there is one
+   * credential path rather than two that can disagree.
+   */
   apiKey: string;
   /** The account's Dial number (E.164). Used as the shared line's platform_id. */
   fromNumber: string;
@@ -136,31 +147,29 @@ const DIAL_DEFAULTS: ChannelDefaults = {
 
 export function createDialAdapter(config: DialConfig): ChannelAdapter {
   /**
-   * `POST /api/v1/messages` — the one Dial API call this adapter makes.
-   * Mirrors the SDK's own request: bearer key, JSON body, `{ message }`
-   * envelope, and a throw carrying the status and body on a non-2xx (which is
-   * what puts a failed send on the delivery retry path, see deliver()).
+   * The one outbound call this adapter makes: `dial message … --json`.
+   *
+   * The CLI is already a hard requirement (it registers the inbound command
+   * target) and it authenticates from the same auth file this adapter reads, so
+   * there is no second credential path. Every failure — non-zero exit, timeout,
+   * unparseable output, `ok:false` — rejects, which is what puts the send on
+   * delivery.ts's bounded retry path rather than marking it delivered
+   * (see deliver()).
    */
-  async function postMessage(params: { to: string; body: string; fromNumber?: string }): Promise<string | undefined> {
-    const res = await fetch(`${DIAL_API_BASE_URL}/api/v1/messages`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${config.apiKey}`,
-        'Content-Type': 'application/json',
-        'User-Agent': nanoclawUserAgent(),
-      },
-      body: JSON.stringify({
-        to: params.to,
-        body: params.body,
-        ...(params.fromNumber ? { fromNumber: params.fromNumber } : {}),
-      }),
+  async function sendViaCli(params: { to: string; body: string; fromNumber?: string }): Promise<string | undefined> {
+    const args = ['message', '--to', params.to, '--body', params.body, '--json'];
+    if (params.fromNumber) args.push('--from-number', params.fromNumber);
+    const { stdout } = await execFileAsync(config.cliPath, args, {
+      encoding: 'utf8',
+      timeout: SEND_TIMEOUT_MS,
+      env: { ...process.env, DIAL_USER_AGENT: nanoclawUserAgent() },
     });
-    if (!res.ok) {
-      const detail = await res.text().catch(() => '');
-      throw new Error(`Dial API error ${res.status}: ${detail}`);
-    }
-    const data = (await res.json()) as { message?: { id?: string } };
-    return data.message?.id;
+    // `--json` prints {"ok":true,"message":{…}} on success. A non-zero exit
+    // already rejected above; an unparseable stdout means the CLI changed shape
+    // under us, which is a failure too — not a silent "delivered, no id".
+    const parsed = JSON.parse(stdout) as { ok?: boolean; message?: { id?: string } };
+    if (!parsed.ok) throw new Error(`Dial CLI reported a failed send: ${stdout.trim()}`);
+    return parsed.message?.id;
   }
   const spoolDir = path.join(DATA_DIR, 'dial', 'inbound');
   const handlerPath = path.join(DATA_DIR, 'dial', 'handle-dial-event.sh');
@@ -192,7 +201,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     const fromNumber = from || wiredLine();
     let lastId: string | undefined;
     for (const chunk of body.length <= MAX_CHUNK ? [body] : chunkText(body, MAX_CHUNK)) {
-      const sentId = await postMessage({
+      const sentId = await sendViaCli({
         to,
         body: chunk,
         ...(fromNumber ? { fromNumber } : {}),

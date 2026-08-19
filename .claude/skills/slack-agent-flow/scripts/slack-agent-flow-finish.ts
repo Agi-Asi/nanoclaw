@@ -117,12 +117,14 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const root = process.cwd();
 
-  const db = initDb(path.join(DATA_DIR, 'v2.db'));
-  runMigrations(db); // idempotent
+  const db = await initDb(path.join(DATA_DIR, 'v2.db'));
+  await runMigrations(db); // idempotent
 
-  const newGroup = getAgentGroup(args.group);
+  const newGroup = await getAgentGroup(args.group);
   if (!newGroup) throw new Error(`agent group ${args.group} not found (--group)`);
-  if (!getAgentGroup(args.sourceGroup)) throw new Error(`agent group ${args.sourceGroup} not found (--source-group)`);
+  if (!(await getAgentGroup(args.sourceGroup))) {
+    throw new Error(`agent group ${args.sourceGroup} not found (--source-group)`);
+  }
 
   const result = await finishSlackAgentFlow({
     slug: args.name,
@@ -137,7 +139,9 @@ async function main(): Promise<void> {
   console.log('');
   console.log('Slack leg complete:');
   console.log(`  agent     ${newGroup.name} [${args.group}]`);
-  console.log(`  instance  slack-${result.slug} (SLACK_INSTANCES + SLACK_*_TOKEN_${result.slug.toUpperCase().replace(/-/g, '_')})`);
+  console.log(
+    `  instance  slack-${result.slug} (SLACK_INSTANCES + SLACK_*_TOKEN_${result.slug.toUpperCase().replace(/-/g, '_')})`,
+  );
   console.log(`  bot       ${result.newBotUserId}`);
   console.log(`  DM        ${result.dmChannelId} (operator ${result.operatorUserId})`);
   console.log(

@@ -55,7 +55,7 @@ export interface ProvisionInput {
    */
   allowGuests?: boolean;
   /**
-   * Fleet-analytics attribution, all optional — sent on the broker's
+   * Request-origin metadata, all optional — sent on the broker's
    * POST /v1/apps body only when defined (requested_by / parent_app_id /
    * template on the wire; a broker that predates them ignores unknown body
    * fields). client_version is derived from rootDir's package.json inside

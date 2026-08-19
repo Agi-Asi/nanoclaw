@@ -187,7 +187,7 @@ interface RawProvisioned {
 }
 
 /**
- * Optional fleet-analytics fields on the broker's POST /v1/apps body
+ * Optional request-origin metadata on the broker's POST /v1/apps body
  * (requested_by / parent_app_id / template / client_version on the wire).
  * Sent only when defined; a broker that predates them ignores unknown body
  * fields. Names and no-value-no-key behavior are pinned across every
@@ -202,7 +202,7 @@ interface ProvisionAttribution {
 }
 
 /**
- * The installing host's package.json version — the client_version analytics
+ * The installing host's package.json version — the client_version metadata
  * field. Optional-shaped: unreadable/absent → undefined and the field is
  * simply omitted (never a placeholder value).
  */
@@ -357,7 +357,7 @@ async function provisionViaBroker(
         name: displayName,
         ...(avatarId ? { avatar_id: avatarId } : {}),
         ...(allowGuests ? { allow_guests: true } : {}),
-        // Fleet-analytics attribution — optional both ways: omitted when
+        // Request-origin metadata — optional both ways: omitted when
         // unknown, ignored by a broker that predates the fields.
         ...(attribution.requestedBy ? { requested_by: attribution.requestedBy } : {}),
         ...(attribution.parentAppId ? { parent_app_id: attribution.parentAppId } : {}),

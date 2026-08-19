@@ -117,7 +117,7 @@ export const MANAGED_APP_DESCRIPTION =
   'Personal AI agent, provisioned and managed by the NanoClaw app. Learn more at nanoclaw.dev/slack.';
 
 /**
- * Optional fleet/operations attribution fields, all additive. On the broker
+ * Optional request-origin metadata fields, all additive. On the broker
  * transport they ride the POST /v1/apps HTTP body verbatim (sent only when
  * defined — JSON serialization drops undefined values); a service that does
  * not know them ignores them. They NEVER influence the Slack app manifest,

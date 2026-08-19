@@ -31,6 +31,23 @@ const SESSION_STATUS_RETRY_ERROR_AFTER = 3;
 const STALE_SESSION_RE =
   /no conversation found|ENOENT.*\.jsonl|session.*not found|NotFoundError|connection reset|ECONNRESET|404|event timeout/i;
 
+/**
+ * Codex `startOrResumeCodexThread` starts a fresh thread when `thread/resume`
+ * reports the id gone. OpenCode's equivalent failure is quieter: a poisoned
+ * session accepts `promptAsync`, emits `session.idle` at step 0 with no
+ * assistant work, and the runner treats that as a finished turn. Only a
+ * *resume* that produced no assistant work should fall back, and only once
+ * per query — a brand-new session that stays dry is a model/tools miss, not
+ * a dead continuation.
+ */
+export function isEmptyOpenCodeResume(opts: {
+  resumedExistingSession: boolean;
+  alreadyFellBack: boolean;
+  sawAssistantWork: boolean;
+}): boolean {
+  return opts.resumedExistingSession && !opts.alreadyFellBack && !opts.sawAssistantWork;
+}
+
 function killProcessTree(proc: ChildProcess): void {
   if (!proc.pid) return;
   try {
@@ -655,6 +672,29 @@ export interface QuestionClient {
 }
 
 /**
+ * Narrow runtime surface so tests can drive `query()` without spawning
+ * `opencode serve`. Production uses `ensureSharedRuntime`.
+ */
+export interface OpenCodeRuntimeHandle {
+  client: {
+    session: {
+      create(): Promise<{ data?: { id?: string }; error?: unknown }>;
+      promptAsync(params: { path: { id: string }; body: { parts: unknown[] } }): Promise<{ error?: unknown }>;
+    };
+    postSessionIdPermissionsPermissionId?(params: {
+      path: { id: string; permissionID: string };
+      body: { response: string };
+    }): Promise<unknown>;
+  };
+  stream: AsyncGenerator<{ type: string; properties: Record<string, unknown> }, void, void>;
+  questionClient: QuestionClient;
+}
+
+export interface OpenCodeRuntimeDeps {
+  getRuntime(options: ProviderOptions): Promise<OpenCodeRuntimeHandle>;
+}
+
+/**
  * Answer a single pending question request with the steering text, one
  * custom answer per sub-question (OpenCode's `question` tool defaults
  * `custom: true`, i.e. an answer string that isn't one of the offered
@@ -784,11 +824,13 @@ export class OpenCodeProvider implements AgentProvider {
   readonly supportsNativeSlashCommands = false;
 
   private readonly options: ProviderOptions;
+  private readonly runtime?: OpenCodeRuntimeDeps;
   private activeSessionId: string | undefined;
   private memorySessionHook?: OpenCodeMemorySessionHook;
 
-  constructor(options: ProviderOptions = {}) {
+  constructor(options: ProviderOptions = {}, runtime?: OpenCodeRuntimeDeps) {
     this.options = options;
+    this.runtime = runtime;
   }
 
   // OpenCode has no native session-start hook mechanism to hand the command to
@@ -816,7 +858,16 @@ export class OpenCodeProvider implements AgentProvider {
       this.activeSessionId = undefined;
     }
 
-    const pending: Array<{ text: string; attachments?: OpenCodePromptAttachment[] }> = [];
+    const pending: Array<{
+      text: string;
+      attachments?: OpenCodePromptAttachment[];
+      // The unwrapped prompt, set only on an opening turn that resumed a
+      // persisted continuation. Its presence is what licenses the empty-resume
+      // fallback; its value is what the replay re-composes from, so the
+      // replacement session gets the same prompt shape a first-time session
+      // would have got instead of a second <system> block stacked on the first.
+      replayPrompt?: string;
+    }> = [];
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
@@ -837,6 +888,7 @@ export class OpenCodeProvider implements AgentProvider {
     pending.push({
       text: wrapPromptWithContext(input.prompt, memory.openingInstructions(systemInstructions)),
       attachments: openingAttachments,
+      replayPrompt: input.continuation ? input.prompt : undefined,
     });
 
     const kick = (): void => {
@@ -845,10 +897,11 @@ export class OpenCodeProvider implements AgentProvider {
 
     const self = this;
     const IDLE_TIMEOUT_MS = Number(process.env.OPENCODE_IDLE_TIMEOUT_MS) || 300_000;
+    let emptyResumeFellBack = false;
 
     async function* gen(): AsyncGenerator<ProviderEvent> {
       let initYielded = false;
-      const rt = await ensureSharedRuntime(self.options);
+      const rt = self.runtime ? await self.runtime.getRuntime(self.options) : await ensureSharedRuntime(self.options);
       const { client, stream, questionClient } = rt;
 
       while (!aborted) {
@@ -862,7 +915,7 @@ export class OpenCodeProvider implements AgentProvider {
         if (aborted) return;
         if (pending.length === 0 && ended) return;
 
-        const { text, attachments } = pending.shift()!;
+        const { text, attachments, replayPrompt } = pending.shift()!;
         let sessionId = self.activeSessionId;
 
         if (!sessionId) {
@@ -880,136 +933,208 @@ export class OpenCodeProvider implements AgentProvider {
           initYielded = true;
         }
 
-        const promptRes = await client.session.promptAsync({
-          path: { id: sessionId },
-          body: { parts: buildPromptParts(text, attachments) },
-        });
-        if (promptRes.error) {
-          self.activeSessionId = undefined;
-          throw new Error(`OpenCode promptAsync: ${JSON.stringify(promptRes.error)}`);
-        }
-
-        const partTextByMessageId = new Map<string, string>();
-        const roleByMessageId = new Map<string, string>();
-        let lastEventAt = Date.now();
-        let eventTimedOut = false;
-        const timeoutCheck = setInterval(() => {
-          if (Date.now() - lastEventAt > IDLE_TIMEOUT_MS) {
-            log(`OpenCode event timeout (${IDLE_TIMEOUT_MS}ms) — clearing session ${sessionId}`);
-            eventTimedOut = true;
+        async function* runTurn(
+          turnSessionId: string,
+          turnText: string,
+          turnAttachments: typeof attachments,
+        ): AsyncGenerator<ProviderEvent, { resultText: string; sawAssistantWork: boolean }> {
+          const promptRes = await client.session.promptAsync({
+            path: { id: turnSessionId },
+            body: { parts: buildPromptParts(turnText, turnAttachments) },
+          });
+          if (promptRes.error) {
             self.activeSessionId = undefined;
-            destroySharedRuntime();
-            kick();
+            throw new Error(`OpenCode promptAsync: ${JSON.stringify(promptRes.error)}`);
           }
-        }, 5000);
 
-        try {
-          turn: while (true) {
-            if (aborted) return;
-            if (eventTimedOut) {
-              throw new Error(`OpenCode event timeout (${IDLE_TIMEOUT_MS}ms)`);
+          const partTextByMessageId = new Map<string, string>();
+          const roleByMessageId = new Map<string, string>();
+          const partMessageIds = new Set<string>();
+          const erroredMessageIds = new Set<string>();
+          // Set only by signals that have no message record of their own
+          // (permissions, questions, compaction). Message-derived work is
+          // decided once, after the turn, in the loop below.
+          let sawAssistantWork = false;
+          let lastEventAt = Date.now();
+          let eventTimedOut = false;
+          const timeoutCheck = setInterval(() => {
+            if (Date.now() - lastEventAt > IDLE_TIMEOUT_MS) {
+              log(`OpenCode event timeout (${IDLE_TIMEOUT_MS}ms) — clearing session ${turnSessionId}`);
+              eventTimedOut = true;
+              self.activeSessionId = undefined;
+              destroySharedRuntime();
+              kick();
             }
+          }, 5000);
 
-            const { value: ev, done } = await stream.next();
-            if (done) {
-              throw new Error('OpenCode SSE stream ended unexpectedly');
-            }
-
-            if (!ev?.type || ev.type === 'server.connected' || ev.type === 'server.heartbeat') continue;
-
-            lastEventAt = Date.now();
-            yield { type: 'activity' };
-
-            switch (ev.type) {
-              case 'message.updated': {
-                const info = ev.properties.info as { id?: string; role?: string } | undefined;
-                if (info?.id && info?.role) {
-                  roleByMessageId.set(info.id, info.role);
-                }
-                break;
+          try {
+            turn: while (true) {
+              if (aborted) return { resultText: '', sawAssistantWork };
+              if (eventTimedOut) {
+                throw new Error(`OpenCode event timeout (${IDLE_TIMEOUT_MS}ms)`);
               }
-              case 'message.part.updated': {
-                const part = ev.properties.part as { type?: string; messageID?: string; text?: string } | undefined;
-                if (part?.type === 'text' && part.messageID && part.text) {
-                  partTextByMessageId.set(part.messageID, part.text);
-                }
-                break;
+
+              const { value: ev, done } = await stream.next();
+              if (done) {
+                throw new Error('OpenCode SSE stream ended unexpectedly');
               }
-              case 'permission.updated': {
-                const perm = ev.properties as { id?: string; sessionID?: string };
-                if (perm.sessionID === sessionId && perm.id) {
-                  try {
-                    await client.postSessionIdPermissionsPermissionId({
-                      path: { id: sessionId, permissionID: perm.id },
-                      body: { response: 'always' },
-                    });
-                  } catch (err) {
-                    log(`Failed to auto-reply permission: ${err instanceof Error ? err.message : String(err)}`);
+
+              if (!ev?.type || ev.type === 'server.connected' || ev.type === 'server.heartbeat') continue;
+
+              lastEventAt = Date.now();
+              yield { type: 'activity' };
+
+              switch (ev.type) {
+                case 'message.updated': {
+                  const info = ev.properties.info as
+                    | { id?: string; role?: string; sessionID?: string; error?: unknown }
+                    | undefined;
+                  if (info?.sessionID && info.sessionID !== turnSessionId) break;
+                  if (info?.id && info?.role) {
+                    roleByMessageId.set(info.id, info.role);
+                    // `message.updated` fires repeatedly for the same record, so
+                    // latch the error rather than reading the last event only.
+                    if (info.error) erroredMessageIds.add(info.id);
                   }
+                  break;
                 }
-                break;
-              }
-              case 'question.asked': {
-                const req = ev.properties as { id?: string; sessionID?: string; questions?: unknown[] };
-                await handleQuestionAsked(questionClient, req);
-                break;
-              }
-              case 'session.status': {
-                const props = ev.properties as {
-                  sessionID?: string;
-                  status?: { type?: string; attempt?: number; message?: string };
-                };
-                if (props.sessionID !== sessionId) break;
-                const st = props.status;
-                if (
-                  st?.type === 'retry' &&
-                  typeof st.attempt === 'number' &&
-                  st.attempt >= SESSION_STATUS_RETRY_ERROR_AFTER &&
-                  st.message
-                ) {
-                  self.activeSessionId = undefined;
-                  throw new Error(`OpenCode retry limit (${st.attempt}): ${st.message}`);
+                case 'message.part.updated': {
+                  const part = ev.properties.part as
+                    | { type?: string; messageID?: string; sessionID?: string; text?: string }
+                    | undefined;
+                  if (part?.sessionID && part.sessionID !== turnSessionId) break;
+                  if (part?.messageID) {
+                    partMessageIds.add(part.messageID);
+                    if (part.type === 'text' && part.text) {
+                      partTextByMessageId.set(part.messageID, part.text);
+                    }
+                  }
+                  break;
                 }
-                break;
-              }
-              case 'session.error': {
-                const props = ev.properties as { sessionID?: string; error?: unknown };
-                if (props.sessionID === sessionId || props.sessionID === undefined) {
-                  self.activeSessionId = undefined;
-                  throw new Error(sessionErrorMessage(props));
+                case 'permission.updated': {
+                  const perm = ev.properties as { id?: string; sessionID?: string };
+                  if (perm.sessionID === turnSessionId && perm.id) {
+                    sawAssistantWork = true;
+                    try {
+                      await client.postSessionIdPermissionsPermissionId?.({
+                        path: { id: turnSessionId, permissionID: perm.id },
+                        body: { response: 'always' },
+                      });
+                    } catch (err) {
+                      log(`Failed to auto-reply permission: ${err instanceof Error ? err.message : String(err)}`);
+                    }
+                  }
+                  break;
                 }
-                break;
-              }
-              case 'session.compacted': {
-                // The active session was just auto-compacted; arm the routing
-                // reminder for the next prompt. Filter by sessionID like the
-                // other cases — the shared server emits this for every session.
-                const sid = (ev.properties as { sessionID?: string }).sessionID;
-                compaction.note(sid, sessionId);
-                break;
-              }
-              case 'session.idle': {
-                const sid = (ev.properties as { sessionID?: string }).sessionID;
-                if (sid === sessionId) {
-                  break turn;
+                case 'question.asked': {
+                  const req = ev.properties as { id?: string; sessionID?: string; questions?: unknown[] };
+                  if (req.sessionID === turnSessionId) sawAssistantWork = true;
+                  await handleQuestionAsked(questionClient, req);
+                  break;
                 }
-                break;
+                case 'session.status': {
+                  const props = ev.properties as {
+                    sessionID?: string;
+                    status?: { type?: string; attempt?: number; message?: string };
+                  };
+                  if (props.sessionID !== turnSessionId) break;
+                  const st = props.status;
+                  if (
+                    st?.type === 'retry' &&
+                    typeof st.attempt === 'number' &&
+                    st.attempt >= SESSION_STATUS_RETRY_ERROR_AFTER &&
+                    st.message
+                  ) {
+                    self.activeSessionId = undefined;
+                    throw new Error(`OpenCode retry limit (${st.attempt}): ${st.message}`);
+                  }
+                  break;
+                }
+                case 'session.error': {
+                  const props = ev.properties as { sessionID?: string; error?: unknown };
+                  if (props.sessionID === turnSessionId || props.sessionID === undefined) {
+                    self.activeSessionId = undefined;
+                    throw new Error(sessionErrorMessage(props));
+                  }
+                  break;
+                }
+                case 'session.compacted': {
+                  // The active session was just auto-compacted; arm the routing
+                  // reminder for the next prompt. Filter by sessionID like the
+                  // other cases — the shared server emits this for every session.
+                  const sid = (ev.properties as { sessionID?: string }).sessionID;
+                  compaction.note(sid, turnSessionId);
+                  if (sid === turnSessionId) sawAssistantWork = true;
+                  break;
+                }
+                case 'session.idle': {
+                  const sid = (ev.properties as { sessionID?: string }).sessionID;
+                  if (sid === turnSessionId) {
+                    break turn;
+                  }
+                  break;
+                }
+                default:
+                  break;
               }
-              default:
-                break;
             }
+          } finally {
+            clearInterval(timeoutCheck);
           }
-        } finally {
-          clearInterval(timeoutCheck);
-        }
 
-        let resultText = '';
-        for (const [msgId, role] of roleByMessageId) {
-          if (role === 'assistant') {
+          let resultText = '';
+          for (const [msgId, role] of roleByMessageId) {
+            if (role !== 'assistant') continue;
+            // The bare envelope is the quiet-idle signature. OpenCode opens the
+            // assistant record when the turn starts (`AssistantMessage.time` has
+            // a required `created` and an optional `completed`), so the record
+            // existing proves nothing on its own. Work means it produced at
+            // least one part — or that it carries a provider error, which marks
+            // a live session whose turn failed: replaying that on a fresh
+            // session would discard the history and bury the error.
+            if (partMessageIds.has(msgId) || erroredMessageIds.has(msgId)) {
+              sawAssistantWork = true;
+            }
             resultText = partTextByMessageId.get(msgId) ?? resultText;
           }
+          return { resultText, sawAssistantWork };
         }
-        yield { type: 'result', text: resultText || null };
+
+        let outcome = yield* runTurn(sessionId, text, attachments);
+        if (aborted) return;
+
+        if (
+          isEmptyOpenCodeResume({
+            resumedExistingSession: replayPrompt !== undefined,
+            alreadyFellBack: emptyResumeFellBack,
+            sawAssistantWork: outcome.sawAssistantWork,
+          })
+        ) {
+          log(`Empty resume on ${sessionId}; starting fresh session.`);
+          emptyResumeFellBack = true;
+          self.activeSessionId = undefined;
+          const created = await client.session.create();
+          if (aborted) return;
+          if (created.error) {
+            throw new Error(`OpenCode: failed to create session: ${JSON.stringify(created.error)}`);
+          }
+          const freshId = created.data?.id;
+          if (!freshId) throw new Error('OpenCode: failed to create session (no id)');
+          sessionId = freshId;
+          self.activeSessionId = freshId;
+          yield { type: 'init', continuation: freshId };
+          initYielded = true;
+          // Compose the replay the way a first-time query composes an opening
+          // prompt — one <system> block carrying memory and the instructions —
+          // rather than wrapping the already-wrapped resume text a second time.
+          // `replayPrompt` is defined here: it is what licensed this branch.
+          const freshMemory = createMemoryLifecycle(self.memorySessionHook, false);
+          const retryText = wrapPromptWithContext(replayPrompt!, freshMemory.openingInstructions(systemInstructions));
+          outcome = yield* runTurn(freshId, retryText, attachments);
+          if (aborted) return;
+        }
+
+        yield { type: 'result', text: outcome.resultText || null };
       }
     }
 

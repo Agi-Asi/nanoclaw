@@ -210,12 +210,7 @@ pnpm exec vitest run src/modules/slack-agent-flow src/modules/slack-room-members
 ```
 
 ```nc:run effect:test
-PROJECT_ROOT="$PWD"
-source "$PROJECT_ROOT/setup/lib/install-slug.sh"
-"${CONTAINER_RUNTIME:-docker}" run --rm --entrypoint bun --workdir /app \
-  --volume "$PROJECT_ROOT/container/agent-runner/src:/app/src:ro" \
-  "$(container_image_base):latest" \
-  test src/mcp-tools/rooms.test.ts src/mcp-tools/canvas.test.ts
+source "$PWD/setup/lib/install-slug.sh" && "${CONTAINER_RUNTIME:-docker}" run --rm --entrypoint bun --workdir /app --volume "$PWD/container/agent-runner/src:/app/src:ro" "$(container_image_base):latest" test src/mcp-tools/rooms.test.ts src/mcp-tools/canvas.test.ts
 ```
 
 ### 9. Restart the host

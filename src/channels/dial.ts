@@ -69,6 +69,27 @@ const MAX_CHUNK = 1500;
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Environment for every `dial` invocation.
+ *
+ * The CLI is a Node script (`#!/usr/bin/env node`), so running it needs `node`
+ * on PATH — not just the CLI itself. The service does not inherit the operator's
+ * interactive PATH, and both binaries usually live in the same version-manager
+ * bin directory, so PATH is widened with the CLI's own directory and the
+ * directory of the Node currently running NanoClaw. Without this, an absolute
+ * DIAL_CLI_PATH still fails with `env: node: No such file or directory`, the
+ * inbound command target is never registered, and the channel comes up
+ * connected but deaf.
+ */
+function cliEnvFor(cliPath: string): NodeJS.ProcessEnv {
+  const current = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
+  const extra = [...new Set([path.dirname(cliPath), path.dirname(process.execPath)])].filter(
+    (d) => d && !current.includes(d),
+  );
+  const merged = [...extra, ...current];
+  return { ...process.env, PATH: merged.join(path.delimiter), DIAL_USER_AGENT: nanoclawUserAgent() };
+}
+
 /** Ceiling for one outbound send; the delivery layer retries a rejection. */
 const SEND_TIMEOUT_MS = 30_000;
 
@@ -165,7 +186,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     const { stdout } = await execFileAsync(config.cliPath, args, {
       encoding: 'utf8',
       timeout: SEND_TIMEOUT_MS,
-      env: { ...process.env, DIAL_USER_AGENT: nanoclawUserAgent() },
+      env: cliEnvFor(config.cliPath),
     });
     // `--json` prints {"ok":true,"message":{…}} on success. A non-zero exit
     // already rejected above; an unparseable stdout means the CLI changed shape
@@ -437,7 +458,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       log.error('Dial: could not write command-target handler — inbound will not route', { handlerPath, err });
       return false;
     }
-    const cliEnv = { ...process.env, DIAL_USER_AGENT: nanoclawUserAgent() };
+    const cliEnv = cliEnvFor(config.cliPath);
     try {
       const listed = execFileSync(config.cliPath, ['local-target', 'list', '--json'], {
         encoding: 'utf8',

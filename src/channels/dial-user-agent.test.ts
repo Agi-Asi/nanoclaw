@@ -1,4 +1,5 @@
 import fs from 'fs';
+import path from 'path';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -67,6 +68,23 @@ describe('Dial adapter outbound send', () => {
       '--from-number',
       '+14155550123',
     ]);
+  });
+
+  it("prepends the CLI's own directory to PATH so its node shebang resolves", async () => {
+    // The CLI is a node script, so spawning it needs `node` on PATH — which the
+    // service's PATH may not carry. node and dial share a bin directory, so that
+    // directory going on PATH is what makes the shebang resolve.
+    spawns.length = 0;
+    const adapter = createDialAdapter({
+      apiKey: 'sk_live_test',
+      fromNumber: '+14155550123',
+      cliPath: '/opt/nodebin/dial',
+    });
+    await adapter.deliver('+14155550123', '+15557654321', { content: 'hi' } as unknown as OutboundMessage);
+    const send = spawns.filter((s) => s.args[0] === 'message')[0];
+    const dirs = ((send.opts.env as Record<string, string>).PATH ?? '').split(':');
+    expect(dirs).toContain('/opt/nodebin');
+    expect(dirs).toContain(path.dirname(process.execPath));
   });
 
   it('rejects when the CLI exits non-zero so the send lands on the retry path', async () => {

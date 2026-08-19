@@ -31,6 +31,7 @@ describe('setup flow consumes the registry (structural)', () => {
   it('the picker renders options from listSetupProviders', () => {
     const src = fs.readFileSync(path.join(process.cwd(), 'setup', 'auto.ts'), 'utf-8');
     expect(src).toContain('listSetupProviders()');
+    expect(src).toContain('buildAgentRuntimePickerOptions');
     expect(src).toContain("import './providers/index.js'");
     expect(src).toContain('NANOCLAW_AGENT_PROVIDER');
     // The capability-keyed branch — a provider's own auth runs iff it declares one.

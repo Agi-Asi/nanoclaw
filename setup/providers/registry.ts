@@ -20,13 +20,17 @@ import type { AssistContext } from '../lib/claude-assist.js'; // type-only — r
  *                     falls back to the guarded Claude offer (never install/sign-in).
  */
 export type FailureAssistResult = 'launched' | 'declined' | 'unavailable';
+export interface ProviderAuthOptions {
+  /** Re-acquire and replace an existing credential (for expiry/revocation). */
+  force?: boolean;
+}
 
 export interface SetupProviderEntry {
   value: string;
   label: string;
   hint: string;
   /** Provider-owned auth walk-through (vault-only). Absent → standard auth step. */
-  runAuth?: () => Promise<void>;
+  runAuth?: (options?: ProviderAuthOptions) => Promise<void>;
   /** Verifies the provider's payload is wired (files, barrels, Dockerfile pin). */
   runInstallCheck?: () => Promise<void>;
   /** Provider-owned interactive failure debugger. 'unavailable' → dispatcher

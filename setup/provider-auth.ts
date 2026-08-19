@@ -21,19 +21,24 @@ import './providers/index.js';
 // Hard-wired install skills — the audited control surface (no branch
 // enumeration). Each `/add-<name>` SKILL.md is idempotent and self-skips when
 // the payload is already wired; it is applied in-process via the directive
-// engine (no shell-out to a drift-prone setup/add-<name>.sh). Codex is the only
-// manifest-style provider today.
+// engine (no shell-out to a drift-prone setup/add-<name>.sh). Codex and Cursor
+// are the installable providers today.
 const INSTALL_SKILLS: Record<string, string> = {
   codex: '.claude/skills/add-codex',
+  cursor: '.claude/skills/add-cursor',
 };
 
-export async function run(args: string[]): Promise<void> {
+type ProviderModuleLoader = (name: string) => Promise<unknown>;
+
+const loadProviderModule: ProviderModuleLoader = (name) => import(/* @vite-ignore */ `./providers/${name}.js`);
+
+export async function run(args: string[], loadProvider: ProviderModuleLoader = loadProviderModule): Promise<void> {
   const name = args[0]?.trim().toLowerCase();
   const withAuth = listSetupProviders().filter((entry) => entry.runAuth);
 
   if (!name) {
     console.error(
-      `Usage: pnpm exec tsx setup/index.ts --step provider-auth <provider>\n` +
+      `Usage: pnpm exec tsx setup/index.ts --step provider-auth <provider> [--force]\n` +
         `Providers with an auth step: ${withAuth.map((entry) => entry.value).join(', ') || '(none installed)'}`,
     );
     process.exit(1);
@@ -66,7 +71,7 @@ export async function run(args: string[]): Promise<void> {
       }
     }
     if (!entry) {
-      await import(`./providers/${name}.js`);
+      await loadProvider(name);
       entry = getSetupProvider(name);
     }
     if (!entry) {
@@ -86,6 +91,6 @@ export async function run(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  await entry.runAuth();
+  await entry.runAuth({ force: args.slice(1).includes('--force') });
   await entry.runInstallCheck?.();
 }

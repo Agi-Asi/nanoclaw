@@ -41,6 +41,7 @@ import { runInheritScript } from './lib/inherit-script.js';
 import { pingCliAgent, PING_AGENT_FOLDER, type PingResult } from './lib/agent-ping.js';
 import { getSetupProvider, listSetupProviders } from './providers/registry.js';
 import { applyProviderSkill } from './providers/install.js';
+import { buildAgentRuntimePickerOptions } from './providers/picker.js';
 // Provider payloads self-register their picker entry + auth on import.
 import './providers/index.js';
 import { brightSelect } from './lib/bright-select.js';
@@ -478,8 +479,15 @@ async function main(): Promise<void> {
           rebuild.hint,
         );
       }
-      await import(`./providers/${agentProvider}.js`);
+      await import(/* @vite-ignore */ `./providers/${agentProvider}.js`);
       providerEntry = getSetupProvider(agentProvider);
+      if (!providerEntry) {
+        await fail(
+          `add-${agentProvider}`,
+          `Installed ${agentProvider}, but its setup provider did not register.`,
+          `Check setup/providers/${agentProvider}.ts and setup/providers/index.ts, then retry.`,
+        );
+      }
     }
     if (providerEntry?.runAuth) {
       await providerEntry.runAuth();
@@ -950,11 +958,12 @@ function sendChatMessage(message: string): Promise<void> {
 
 // Providers offered for install are hard-wired in trunk — an audited control
 // surface (no branch enumeration that anyone with write access could extend).
-// Codex is the only one offered here; opencode/ollama install via their own
+// Codex and Cursor are offered here; opencode/ollama install via their own
 // /add-* skills. Each is installed by applying its `/add-<name>` SKILL.md
 // in-process via the directive engine.
 const INSTALLABLE_PROVIDERS = [
   { value: 'codex', label: 'Codex', hint: 'OpenAI — ChatGPT subscription or API key' },
+  { value: 'cursor', label: 'Cursor', hint: 'Cursor — account sign-in or API key' },
 ] as const;
 
 // `pickSavedByPreviousRun`: the .env bridge promoted a pick persisted by a
@@ -1332,27 +1341,16 @@ async function chooseImageSource(): Promise<void> {
 
 async function askAgentProviderChoice(): Promise<string> {
   const installed = listSetupProviders();
-  const installedNames = new Set(installed.map((entry) => entry.value));
-  // Offer the hard-wired installable providers this install hasn't wired yet —
-  // selecting one applies its `/add-<name>` SKILL.md in-process.
-  const available = INSTALLABLE_PROVIDERS.filter((prov) => !installedNames.has(prov.value));
   // On a pinned install every non-Claude runtime forces a local rebuild — the
   // image bakes /app/node_modules and the CLI manifest, and each changes one.
   // Say so on the option rather than only at the confirm two steps later, so
   // the cost is visible while the choice is still being made. Shown only when
   // this install pulls; on a local-build install it is not a trade-off.
-  const pinned = readImageSource() === 'hardened';
-  const note = (value: string, hint: string): string =>
-    pinned && value !== 'claude' ? `${hint} — ⚠ not in the pre-built image; needs a local build` : hint;
-
-  const options = [
-    ...installed.map(({ value, label, hint }) => ({ value, label, hint: note(value, hint) })),
-    ...available.map((prov) => ({
-      value: prov.value,
-      label: prov.label,
-      hint: note(prov.value, `${prov.hint} — installs now`),
-    })),
-  ];
+  const options = buildAgentRuntimePickerOptions({
+    installed: installed.map(({ value, label, hint }) => ({ value, label, hint })),
+    installable: INSTALLABLE_PROVIDERS,
+    pinnedImage: readImageSource() === 'hardened',
+  });
   const preset = process.env.NANOCLAW_AGENT_PROVIDER?.trim().toLowerCase();
   if (preset) {
     if (!options.some((option) => option.value === preset)) {

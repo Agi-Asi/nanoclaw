@@ -74,6 +74,24 @@ describe('scripts/q.ts', () => {
     expect(r.stdout).toBe('');
   });
 
+  it('PRAGMA prints its result rows', () => {
+    const r = run('PRAGMA journal_mode');
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout.trim()).toBe('delete');
+  });
+
+  it('EXPLAIN prints its result rows', () => {
+    const r = run('EXPLAIN SELECT 1');
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout.trim()).not.toBe('');
+  });
+
+  it('VALUES prints its result rows', () => {
+    const r = run('VALUES (1), (2)');
+    expect(r.status, r.stderr).toBe(0);
+    expect(r.stdout.trim()).toBe('1\n2');
+  });
+
   it('INSERT runs via db.exec and persists', () => {
     const r = run("INSERT INTO t (id, name) VALUES (3, 'carol')");
     expect(r.status).toBe(0);

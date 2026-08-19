@@ -111,7 +111,7 @@ function maskSqlNonCode(statement: string): string {
 
 function isQuery(statement: string): boolean {
   const normalized = maskSqlNonCode(statement).trim().toUpperCase();
-  if (normalized.startsWith('SELECT')) return true;
+  if (/^(?:SELECT|PRAGMA|EXPLAIN|VALUES)\b/.test(normalized)) return true;
   if (!normalized.startsWith('WITH')) return false;
   return !/\b(?:INSERT|UPDATE|DELETE)\b/.test(normalized);
 }

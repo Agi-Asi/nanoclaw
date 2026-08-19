@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   AGENT_BOT_EVENTS,
@@ -10,8 +10,10 @@ import {
   BOT_SCOPES,
   DEFAULT_SLACK_SERVICE_BASE,
   MANAGED_APP_DESCRIPTION,
+  brokerProvision,
   buildManagedAppManifest,
   mapBrokerApp,
+  provisionManagedApp,
   readInstallToken,
   readManagerToken,
   readServiceBase,
@@ -67,6 +69,132 @@ describe('buildManagedAppManifest', () => {
       };
       expect(Object.keys(manifest.oauth_config.scopes)).toEqual(['bot']);
     }
+  });
+
+  it('attribution fields never alter the manifest — they ride the broker body only', () => {
+    const plain = buildManagedAppManifest({ name: 'Trusty' });
+    const attributed = buildManagedAppManifest({
+      name: 'Trusty',
+      requested_by: 'U0REQ1234',
+      parent_app_id: 'A0PARENT1',
+      template: 'research-buddy',
+      client_version: '2.2.0',
+    });
+    expect(attributed).toEqual(plain);
+  });
+});
+
+describe('brokerProvision attribution fields', () => {
+  const fetchMock = vi.fn<(url: string, init?: { body?: unknown }) => Promise<unknown>>();
+  const appResponse = { app_id: 'A0NEW1', app_token: 'xapp-1-new', bot_token: 'xoxb-new' };
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+    process.env.SLACK_SERVICE_BASE = 'https://broker.test';
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    delete process.env.SLACK_SERVICE_BASE;
+    vi.unstubAllGlobals();
+  });
+
+  function jsonResponse(payload: object): object {
+    return { ok: true, status: 200, json: async () => payload, text: async () => JSON.stringify(payload) };
+  }
+
+  /** Route the module's outbound calls: avatar create, avatar poll, app create. */
+  function routeFetch(avatar: { avatar_id?: string | null; status?: string }): void {
+    fetchMock.mockImplementation(async (url: string) => {
+      if (url === 'https://broker.test/v1/avatars') return jsonResponse({ avatar_id: avatar.avatar_id ?? null });
+      if (url.startsWith('https://broker.test/v1/avatars/')) return jsonResponse({ status: avatar.status ?? 'ready' });
+      if (url === 'https://broker.test/v1/apps') return jsonResponse(appResponse);
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+  }
+
+  function sentAppBody(): Record<string, unknown> {
+    const call = fetchMock.mock.calls.find(([url]) => url === 'https://broker.test/v1/apps');
+    expect(call).toBeDefined();
+    return JSON.parse((call![1] as { body: string }).body) as Record<string, unknown>;
+  }
+
+  it('rides the POST /v1/apps body verbatim when supplied', async () => {
+    routeFetch({ avatar_id: null });
+    const app = await brokerProvision('nct_x', {
+      team_id: 'T1',
+      name: 'Pixel',
+      requested_by: 'U0REQ1234',
+      parent_app_id: 'A0PARENT1',
+      template: 'research-buddy',
+      client_version: '2.2.0',
+    });
+    expect(sentAppBody()).toEqual({
+      team_id: 'T1',
+      name: 'Pixel',
+      requested_by: 'U0REQ1234',
+      parent_app_id: 'A0PARENT1',
+      template: 'research-buddy',
+      client_version: '2.2.0',
+    });
+    // The response mapping is untouched by the extra request fields.
+    expect(app.appId).toBe('A0NEW1');
+    expect(app.botToken).toBe('xoxb-new');
+  });
+
+  it('sends nothing extra when the fields are absent or explicitly undefined', async () => {
+    routeFetch({ avatar_id: null });
+    await brokerProvision('nct_x', { team_id: 'T1', name: 'Pixel', requested_by: undefined });
+    expect(sentAppBody()).toEqual({ team_id: 'T1', name: 'Pixel' });
+  });
+
+  it('keeps the avatar_id merge unchanged alongside attribution fields', async () => {
+    routeFetch({ avatar_id: 'av1', status: 'ready' });
+    await brokerProvision('nct_x', { team_id: 'T1', name: 'Pixel', client_version: '2.2.0' });
+    expect(sentAppBody()).toEqual({ team_id: 'T1', name: 'Pixel', avatar_id: 'av1', client_version: '2.2.0' });
+  });
+});
+
+describe('provisionManagedApp attribution fields', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('never forwards them to Slack — neither in the manifest nor as call params', async () => {
+    const fetchMock = vi.fn(async (url: string, _init?: { body?: unknown }) => {
+      if (url === 'https://slack.com/api/apps.manifest.create') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, app_id: 'A1', app_token: 'xapp-1', oauth_authorize_url: 'https://x' }),
+        };
+      }
+      if (url === 'https://slack.com/api/apps.managedInstall') {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ ok: true, api_access_tokens: { bot_access_token: 'xoxb-1' } }),
+        };
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const app = await provisionManagedApp('xoxp-mgr', {
+      name: 'Trusty',
+      requested_by: 'U0REQ1234',
+      parent_app_id: 'A0PARENT1',
+      template: 'research-buddy',
+      client_version: '2.2.0',
+    });
+    expect(app.botToken).toBe('xoxb-1');
+
+    const createCall = fetchMock.mock.calls.find(([url]) => url === 'https://slack.com/api/apps.manifest.create');
+    expect(createCall).toBeDefined();
+    const params = new URLSearchParams((createCall![1] as { body: string }).body);
+    expect([...params.keys()].sort()).toEqual(['generate_app_token', 'manifest']);
+    // The manifest is byte-identical to one built without attribution fields.
+    expect(JSON.parse(params.get('manifest')!)).toEqual(buildManagedAppManifest({ name: 'Trusty' }));
   });
 });
 

@@ -682,16 +682,54 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
     expect(mockDeclineAndNotify).not.toHaveBeenCalled();
   });
 
-  it('owner absent: falls back to the card, no wiring', async () => {
+  it('owner absent in a channel: declines in-channel and FYIs the owner — no card, no wiring', async () => {
     await seedOwnerAndInstanceDm();
     const room = await mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
+    mockApi.slackConversationsInfo.mockResolvedValue({ isMpim: false, name: 'dogfood', creator: 'U0STRANGER' });
+    mockApi.slackConversationsMembers.mockResolvedValue([OWN_BOT, 'U0STRANGER']);
+
+    expect(await intercept(room, mentionEvent('slack:C0ROOM', { senderId: 'U0STRANGER', senderName: 'Dana' }))).toBe(
+      'handled',
+    );
+
+    expect(mockDeclineAndNotify).toHaveBeenCalledTimes(1);
+    const [call] = mockDeclineAndNotify.mock.calls[0] as [Record<string, unknown>];
+    expect(call.messagingGroupId).toBe('mg-room');
+    // Deduped per channel, not per sender: a second person mentioning the bot
+    // in the same channel must not produce a second post.
+    expect(call.dedupeKey).toBe('channel:requires-owner');
+    expect(call.declineText).toContain('only be connected to a channel by my owner');
+    expect(call.declineText).toContain('remove me from this channel');
+    expect(call.fyiText).toContain('Dana');
+    expect(call.fyiText).toContain('#dogfood');
+    // Not a card, and nothing was wired or routed.
+    expect(await getMessagingGroupAgents(room.id)).toHaveLength(0);
+    expect(await getMessagingGroup(room.id)).toMatchObject({ unknown_sender_policy: 'request_approval' });
+    expect(mockRouteInbound).not.toHaveBeenCalled();
+  });
+
+  it('owner absent in an MPIM: still cards — a group DM invite stays an ask', async () => {
+    await seedOwnerAndInstanceDm();
+    const room = await mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
+    mockApi.slackConversationsInfo.mockResolvedValue({ isMpim: true, creator: 'U0STRANGER' });
     mockApi.slackConversationsMembers.mockResolvedValue([OWN_BOT, 'U0STRANGER']);
 
     expect(await intercept(room, mentionEvent('slack:C0ROOM'))).toBe('card');
 
+    expect(mockDeclineAndNotify).not.toHaveBeenCalled();
     expect(await getMessagingGroupAgents(room.id)).toHaveLength(0);
     expect(await getMessagingGroup(room.id)).toMatchObject({ unknown_sender_policy: 'request_approval' });
     expect(mockRouteInbound).not.toHaveBeenCalled();
+  });
+
+  it('owner absent but the conversation could not be classified: cards rather than guessing', async () => {
+    await seedOwnerAndInstanceDm();
+    const room = await mg({ id: 'mg-room', platform_id: 'slack:C0ROOM', unknown_sender_policy: 'request_approval' });
+    mockApi.slackConversationsInfo.mockRejectedValue(new Error('ratelimited'));
+    mockApi.slackConversationsMembers.mockResolvedValue([OWN_BOT, 'U0STRANGER']);
+
+    expect(await intercept(room, mentionEvent('slack:C0ROOM'))).toBe('card');
+    expect(mockDeclineAndNotify).not.toHaveBeenCalled();
   });
 
   it('owner present but instance→agent-group resolution ambiguous: card', async () => {

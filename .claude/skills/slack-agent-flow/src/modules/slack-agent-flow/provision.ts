@@ -186,6 +186,36 @@ interface RawProvisioned {
   installError?: string;
 }
 
+/**
+ * Optional request-origin metadata on the broker's POST /v1/apps body
+ * (requested_by / parent_app_id / template / client_version on the wire).
+ * Sent only when defined; a broker that predates them ignores unknown body
+ * fields. Names and no-value-no-key behavior are pinned across every
+ * provisioning home by provision.congruence.test.ts. The direct transport has
+ * nowhere to record them and never forwards them.
+ */
+interface ProvisionAttribution {
+  requestedBy?: string;
+  parentAppId?: string;
+  template?: string;
+  clientVersion?: string;
+}
+
+/**
+ * The installing host's package.json version — the client_version metadata
+ * field. Optional-shaped: unreadable/absent → undefined and the field is
+ * simply omitted (never a placeholder value).
+ */
+function readClientVersion(rootDir: string): string | undefined {
+  try {
+    const pkg: unknown = JSON.parse(fs.readFileSync(path.join(rootDir, 'package.json'), 'utf-8'));
+    const version = (pkg as { version?: unknown } | null)?.version;
+    return typeof version === 'string' && version.trim() ? version : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Broker mode: POST /v1/apps with the install token; 60s budget. */
 /** Poll cap for the pre-create avatar job — beyond it the bot is born with the mascot. */
 const AVATAR_WAIT_MS = 75_000;
@@ -301,6 +331,7 @@ async function provisionViaBroker(
   teamId: string | undefined,
   description: string | undefined,
   allowGuests = false,
+  attribution: ProvisionAttribution = {},
 ): Promise<RawProvisioned> {
   if (!teamId) {
     throw new SlackFlowError(
@@ -326,6 +357,12 @@ async function provisionViaBroker(
         name: displayName,
         ...(avatarId ? { avatar_id: avatarId } : {}),
         ...(allowGuests ? { allow_guests: true } : {}),
+        // Request-origin metadata — optional both ways: omitted when
+        // unknown, ignored by a broker that predates the fields.
+        ...(attribution.requestedBy ? { requested_by: attribution.requestedBy } : {}),
+        ...(attribution.parentAppId ? { parent_app_id: attribution.parentAppId } : {}),
+        ...(attribution.template ? { template: attribution.template } : {}),
+        ...(attribution.clientVersion ? { client_version: attribution.clientVersion } : {}),
       }),
       signal: AbortSignal.timeout(60_000),
     });
@@ -493,6 +530,12 @@ export async function provisionSlackApp(input: ProvisionInput): Promise<Provisio
           input.teamId,
           input.description,
           allowGuests,
+          {
+            requestedBy: input.requestedBy,
+            parentAppId: input.parentAppId,
+            template: input.template,
+            clientVersion: readClientVersion(rootDir),
+          },
         )
       : await provisionDirect(credential.managerToken, displayName, allowGuests);
 

@@ -42,7 +42,6 @@ import { getMessagingGroupsByChannel, updateMessagingGroup } from '../db/messagi
 import { readEnvFile } from '../env.js';
 import { log } from '../log.js';
 import { nanoclawUserAgent } from './dial-user-agent.js';
-import type { MessagingGroup, UnknownSenderPolicy } from '../types.js';
 import { getOwners } from '../modules/permissions/db/user-roles.js';
 import { upsertUser } from '../modules/permissions/db/users.js';
 
@@ -119,10 +118,11 @@ exit 0
 
 /**
  * `threads: true` gives each correspondent their own thread/session so replies
- * route back correctly. `strict` is the safe default for creation — the
- * operator picks owner-only or public during setup and the adapter reconciles
- * the line to that choice (see inboundPolicy), so a line is never briefly
- * open to everyone before the choice is applied.
+ * route back correctly. `strict` is the safe default for a row the router
+ * auto-creates — a phone number is guessable, and an admitted sender gets a turn
+ * with an agent holding account-scoped Dial credentials. Opening a line is the
+ * operator's explicit per-line choice: the install skills pass
+ * `--unknown-sender-policy` to `ncl messaging-groups create`.
  */
 const DIAL_DEFAULTS: ChannelDefaults = {
   dm: { engageMode: 'pattern', engagePattern: '.', threads: true, unknownSenderPolicy: 'strict' },
@@ -134,7 +134,6 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
   const client = new DialClient({ apiKey: config.apiKey, userAgent: nanoclawUserAgent() });
   const spoolDir = path.join(DATA_DIR, 'dial', 'inbound');
   const handlerPath = path.join(DATA_DIR, 'dial', 'handle-dial-event.sh');
-  const policyPath = path.join(DATA_DIR, 'dial', 'inbound-policy.json');
   // Fallback line for events that don't name the number they arrived on. Each
   // event's actual destination (data.to) takes precedence, so the adapter
   // serves every number on the account, not just this one. Resolved lazily via
@@ -213,40 +212,19 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
    * before its first message stays a DM — which collapses every correspondent
    * into one shared session. Runs per event, not just at startup: the line is
    * usually registered after the adapter connects. Also repairs older installs.
+   *
+   * Repairs `is_group` ONLY. `unknown_sender_policy` is operator state — set per
+   * line at creation and changeable with `ncl` — so the adapter never writes it.
    */
   function ensureLinesAreGroups(): void {
     try {
-      const wanted = inboundPolicy();
       for (const mg of getMessagingGroupsByChannel('dial')) {
-        const updates: Partial<Pick<MessagingGroup, 'is_group' | 'unknown_sender_policy'>> = {};
-        if (mg.is_group !== 1) updates.is_group = 1;
-        if (mg.unknown_sender_policy !== wanted) updates.unknown_sender_policy = wanted;
-        if (Object.keys(updates).length === 0) continue;
-        updateMessagingGroup(mg.id, updates);
-        log.info('Dial: reconciled line', { platformId: mg.platform_id, ...updates });
+        if (mg.is_group === 1) continue;
+        updateMessagingGroup(mg.id, { is_group: 1 });
+        log.info('Dial: reconciled line to a group', { platformId: mg.platform_id });
       }
     } catch (err) {
       log.warn('Dial: could not reconcile the line — correspondents may share one session', { err });
-    }
-  }
-
-  /**
-   * Who may text this line, chosen by the operator during setup and saved by
-   * the add-dial skill. `strict` admits only the paired owner (and anyone
-   * explicitly granted membership); `public` admits everyone.
-   *
-   * Defaults to `strict` when the file is missing: a phone number is guessable,
-   * and an admitted sender gets a turn with an agent holding account-scoped
-   * Dial credentials. Opting into `public` is the operator's call, not ours.
-   */
-  function inboundPolicy(): UnknownSenderPolicy {
-    if (!fs.existsSync(policyPath)) return 'strict';
-    try {
-      const parsed = JSON.parse(fs.readFileSync(policyPath, 'utf8')) as { inboundAccess?: string };
-      return parsed.inboundAccess === 'public' ? 'public' : 'strict';
-    } catch (err) {
-      log.warn('Dial: unreadable inbound-policy file, keeping the line owner-only', { policyPath, err });
-      return 'strict';
     }
   }
 
@@ -486,11 +464,20 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
         log.warn('Dial: no reply recipient (no thread) — dropping outbound', { platformId, threadId });
         return undefined;
       }
+      // Throw on a failed send. `undefined` means "delivered, no platform id"
+      // in the adapter contract, so swallowing the error here would have
+      // delivery.ts mark the message delivered and clear the outbox — a silent
+      // loss. Throwing puts Dial on the bounded retry path (3 attempts, then
+      // markDeliveryFailed).
+      //
+      // Deliberate trade-off: sendSms chunks long bodies, so if chunk 1 sends
+      // and chunk 2 throws, the retry resends chunk 1 and a long message can
+      // arrive twice. A duplicate SMS is preferable to a silently dropped one.
       try {
         return await sendSms(recipient, text, platformId);
       } catch (err) {
-        log.error('Dial: sendMessage failed', { recipient, err });
-        return undefined;
+        log.warn('Dial: send failed, leaving it to the delivery retry path', { recipient, err });
+        throw err;
       }
     },
   };

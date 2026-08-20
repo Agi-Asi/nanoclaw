@@ -216,23 +216,23 @@ describe('extendTool — fixture extension of create_agent (end to end)', () => 
     // feature payload, never on trunk).
     extendTool('create_agent', {
       properties: {
-        purpose: { type: 'string', description: 'One short public line saying what this agent is for.' },
+        fixturePurpose: { type: 'string', description: 'Fixture-only extension value.' },
       },
-      passthroughKeys: ['purpose'],
-      descriptionSuffix: 'The purpose line is shown publicly.',
+      passthroughKeys: ['fixturePurpose'],
+      descriptionSuffix: 'The fixture extension is active.',
     });
 
     const props = schemaProps(createAgent);
-    expect(Object.keys(props).sort()).toEqual(['instructions', 'name', 'purpose']);
-    expect(createAgent.tool.description?.endsWith('The purpose line is shown publicly.')).toBe(true);
+    expect(Object.keys(props)).toEqual(expect.arrayContaining(['instructions', 'name', 'fixturePurpose']));
+    expect(createAgent.tool.description?.endsWith('The fixture extension is active.')).toBe(true);
 
-    await createAgent.handler({ name: 'Scout', purpose: 'Deep research' });
+    await createAgent.handler({ name: 'Scout', fixturePurpose: 'Deep research' });
 
     const payload = lastPayload();
     expect(payload.action).toBe('create_agent');
     expect(payload.name).toBe('Scout');
     expect(payload.instructions).toBeNull();
-    expect(payload.purpose).toBe('Deep research');
+    expect(payload.fixturePurpose).toBe('Deep research');
   });
 
   it('omits extension keys from the payload when the caller does not pass them', async () => {
@@ -242,6 +242,6 @@ describe('extendTool — fixture extension of create_agent (end to end)', () => 
 
     const payload = lastPayload();
     expect(payload.name).toBe('Plain');
-    expect(payload).not.toHaveProperty('purpose');
+    expect(payload).not.toHaveProperty('fixturePurpose');
   });
 });

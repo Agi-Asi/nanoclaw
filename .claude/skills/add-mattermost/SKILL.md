@@ -10,39 +10,25 @@ Adds Mattermost support via the Chat SDK bridge, wrapping the community
 package. Events arrive over an outbound WebSocket (`/api/v4/websocket`) — no
 public URL or webhook is needed for basic messaging.
 
-## Install
+The mechanical steps under **Apply** carry deterministic `nc:` directives and are safe to re-run.
+
+## Apply
 
 NanoClaw doesn't ship channels in trunk. This skill copies the Mattermost
 adapter in from the `channels` branch.
 
-### Pre-flight (idempotent)
+### 1. Copy the adapter and registration test
 
-Skip to **Credentials** if all of these are already in place:
-
-- `src/channels/mattermost.ts` exists
-- `src/channels/index.ts` contains `import './mattermost.js';`
-- `chat-adapter-mattermost` is listed in `package.json` dependencies
-
-Otherwise continue. Every step below is safe to re-run.
-
-### 1. Fetch the channels branch
-
-```bash
-git fetch origin channels
-```
-
-### 2. Copy the adapter and registration test
-
-```bash
-git show origin/channels:src/channels/mattermost.ts > src/channels/mattermost.ts
-git show origin/channels:src/channels/mattermost-registration.test.ts > src/channels/mattermost-registration.test.ts
+```nc:copy from-branch:channels
+src/channels/mattermost.ts
+src/channels/mattermost-registration.test.ts
 ```
 
 ### 3. Append the self-registration import
 
 Append to `src/channels/index.ts` (skip if the line is already present):
 
-```typescript
+```nc:append to:src/channels/index.ts
 import './mattermost.js';
 ```
 
@@ -52,14 +38,16 @@ import './mattermost.js';
 individual maintainer, a handful of releases) — a materially higher risk tier
 than the official `@chat-adapter/*` packages, so pin it exactly:
 
-```bash
-pnpm install chat-adapter-mattermost@1.1.3
+```nc:dep
+chat-adapter-mattermost@1.1.3
 ```
 
 ### 5. Build and validate
 
-```bash
+```nc:run effect:build
 pnpm run build
+```
+```nc:run effect:test
 pnpm exec vitest run src/channels/mattermost-registration.test.ts
 ```
 

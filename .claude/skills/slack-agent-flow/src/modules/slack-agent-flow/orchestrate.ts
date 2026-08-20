@@ -85,8 +85,8 @@ export function deriveInstanceSlug(name: string): string {
  * First approver with a Slack identity, 'slack:' prefix stripped. pickApprover
  * order (scoped admins → global admins → owners) picks who gets the DM.
  */
-export function resolveOperatorSlackUserId(sourceAgentGroupId: string): string | null {
-  const hit = pickApprover(sourceAgentGroupId).find((id) => /^slack:U/i.test(id));
+export async function resolveOperatorSlackUserId(sourceAgentGroupId: string): Promise<string | null> {
+  const hit = (await pickApprover(sourceAgentGroupId)).find((id) => /^slack:U/i.test(id));
   return hit ? hit.slice('slack:'.length) : null;
 }
 
@@ -96,7 +96,7 @@ export function resolveOperatorSlackUserId(sourceAgentGroupId: string): string |
  * to a DIFFERENT agent group. Claimed-but-wired-to-this-group (or to nothing)
  * is the retry path — reuse.
  */
-function slugConflicts(slug: string, newAgentGroupId: string, rootDir: string): boolean {
+async function slugConflicts(slug: string, newAgentGroupId: string, rootDir: string): Promise<boolean> {
   const tokenExists = readEnvValue(rootDir, `SLACK_BOT_TOKEN_${envSuffix(slug)}`) !== undefined;
   const instances = (readEnvValue(rootDir, 'SLACK_INSTANCES') ?? '')
     .split(',')
@@ -105,29 +105,33 @@ function slugConflicts(slug: string, newAgentGroupId: string, rootDir: string): 
   if (!tokenExists && !instances.includes(slug)) return false;
 
   const instanceKey = `slack-${slug}`;
-  for (const mg of getAllMessagingGroups()) {
+  for (const mg of await getAllMessagingGroups()) {
     if (mg.instance !== instanceKey) continue;
-    for (const wiring of getMessagingGroupAgents(mg.id)) {
+    for (const wiring of await getMessagingGroupAgents(mg.id)) {
       if (wiring.agent_group_id !== newAgentGroupId) return true;
     }
   }
   return false;
 }
 
-export function dedupeSlug(base: string, newAgentGroupId: string, rootDir: string = process.cwd()): string {
+export async function dedupeSlug(
+  base: string,
+  newAgentGroupId: string,
+  rootDir: string = process.cwd(),
+): Promise<string> {
   let slug = base;
-  for (let n = 2; slugConflicts(slug, newAgentGroupId, rootDir); n++) slug = `${base}-${n}`;
+  for (let n = 2; await slugConflicts(slug, newAgentGroupId, rootDir); n++) slug = `${base}-${n}`;
   return slug;
 }
 
-function ensureMessagingGroupRow(spec: {
+async function ensureMessagingGroupRow(spec: {
   platformId: string;
   instance: string;
   name: string;
   isGroup: boolean;
   unknownSenderPolicy: MessagingGroup['unknown_sender_policy'];
-}): { mg: MessagingGroup; created: boolean } {
-  const existing = getMessagingGroupByPlatform('slack', spec.platformId, spec.instance);
+}): Promise<{ mg: MessagingGroup; created: boolean }> {
+  const existing = await getMessagingGroupByPlatform('slack', spec.platformId, spec.instance);
   if (existing) return { mg: existing, created: false };
   const mg: MessagingGroup = {
     id: generateId('mg'),
@@ -139,7 +143,7 @@ function ensureMessagingGroupRow(spec: {
     unknown_sender_policy: spec.unknownSenderPolicy,
     created_at: new Date().toISOString(),
   };
-  createMessagingGroup(mg);
+  await createMessagingGroup(mg);
   return { mg, created: true };
 }
 
@@ -160,13 +164,13 @@ interface WiringOverrides {
 /** Get-before-create wiring with channel-declared defaults (engage fields,
  *  plus the B7 session-mode/threads creation-time stamps) unless overridden.
  *  True iff newly created. */
-function ensureWiring(
+async function ensureWiring(
   mg: MessagingGroup,
   agentGroupId: string,
   agentGroupName: string,
   overrides: WiringOverrides = {},
-): boolean {
-  if (getMessagingGroupAgentByPair(mg.id, agentGroupId)) return false;
+): Promise<boolean> {
+  if (await getMessagingGroupAgentByPair(mg.id, agentGroupId)) return false;
   const channelKey = mg.instance ?? mg.channel_type;
   // Overriding engage_mode bypasses the declaration entirely (flow-owned
   // room semantics, D4); declaration-resolved wirings take the declared
@@ -193,7 +197,7 @@ function ensureWiring(
   validateEngageAgainstChannel(wiring, mg);
   // createMessagingGroupAgent persists an explicit `threads` value itself
   // (follow-up UPDATE in src/db/messaging-groups.ts) — the declared threads:1 stamp lands.
-  createMessagingGroupAgent(wiring);
+  await createMessagingGroupAgent(wiring);
   return true;
 }
 
@@ -224,17 +228,17 @@ export interface RoomParticipant {
  * create_agent's parent/child rows count). Name collisions get a numeric
  * suffix, mirroring ensureAgentDestinationForWiring.
  */
-function ensureAgentDestination(fromGroupId: string, toGroupId: string, toName: string): void {
+async function ensureAgentDestination(fromGroupId: string, toGroupId: string, toName: string): Promise<void> {
   if (fromGroupId === toGroupId) return;
-  if (getDestinationByTarget(fromGroupId, 'agent', toGroupId)) return;
+  if (await getDestinationByTarget(fromGroupId, 'agent', toGroupId)) return;
   const base = normalizeName(toName) || toGroupId.slice(0, 8);
   let localName = base;
   let suffix = 2;
-  while (getDestinationByName(fromGroupId, localName)) {
+  while (await getDestinationByName(fromGroupId, localName)) {
     localName = `${base}-${suffix}`;
     suffix++;
   }
-  createDestination({
+  await createDestination({
     agent_group_id: fromGroupId,
     local_name: localName,
     target_type: 'agent',
@@ -245,11 +249,11 @@ function ensureAgentDestination(fromGroupId: string, toGroupId: string, toName: 
 
 /** Full pairwise a2a destination symmetry between every distinct agent group
  *  in the room — "ask Devin" must be actionable from any participant. */
-function ensurePairwiseAgentDestinations(participants: RoomParticipant[]): void {
+async function ensurePairwiseAgentDestinations(participants: RoomParticipant[]): Promise<void> {
   for (const a of participants) {
     for (const b of participants) {
       if (a.agentGroupId === b.agentGroupId) continue;
-      ensureAgentDestination(a.agentGroupId, b.agentGroupId, b.agentGroupName);
+      await ensureAgentDestination(a.agentGroupId, b.agentGroupId, b.agentGroupName);
     }
   }
 }
@@ -343,17 +347,17 @@ export async function ensureAgentRoom(args: {
   let created = false;
   try {
     for (const p of participants) {
-      const row = ensureMessagingGroupRow({
+      const row = await ensureMessagingGroupRow({
         platformId: `slack:${roomChannelId}`,
         instance: p.instanceKey,
         name: args.roomName,
         isGroup: true,
         unknownSenderPolicy: 'public',
       });
-      ensureWiring(row.mg, p.agentGroupId, p.agentGroupName, ROOM_WIRING_OVERRIDES);
+      await ensureWiring(row.mg, p.agentGroupId, p.agentGroupName, ROOM_WIRING_OVERRIDES);
       created = row.created || created;
     }
-    ensurePairwiseAgentDestinations(participants);
+    await ensurePairwiseAgentDestinations(participants);
   } catch (err) {
     throw asFlowError(err, 'room-wire');
   }
@@ -380,7 +384,7 @@ export async function ensureAgentRoom(args: {
     // with F→C) — wire EVERY participating instance: creator as the
     // pattern-engage default responder, siblings mention/accumulate.
     // Non-throwing; no canvas id, nothing to wire.
-    if (canvasId) wireCanvasComments(canvasId, creator, participants, args.roomName);
+    if (canvasId) await wireCanvasComments(canvasId, creator, participants, args.roomName);
   }
 
   return { roomChannelId, created };
@@ -464,7 +468,7 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
   const instanceKey = `slack-${slug}`;
 
   // S1 operator-identity
-  const operatorUserId = resolveOperatorSlackUserId(sourceGroupId);
+  const operatorUserId = await resolveOperatorSlackUserId(sourceGroupId);
   if (!operatorUserId) {
     throw new SlackFlowError(
       'operator-identity',
@@ -560,7 +564,7 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
   // session_mode 'shared' and leaves the threads column NULL explicitly.
   let dmCreated = false;
   try {
-    const dmRow = ensureMessagingGroupRow({
+    const dmRow = await ensureMessagingGroupRow({
       platformId: `slack:${dmChannelId}`,
       instance: instanceKey,
       name: `${displayName} DM`,
@@ -569,7 +573,12 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
     });
     dmCreated = dmRow.created;
     const agentView = args.allowGuests !== true;
-    ensureWiring(dmRow.mg, newAgentGroupId, displayName, agentView ? {} : { session_mode: 'shared', threads: null });
+    await ensureWiring(
+      dmRow.mg,
+      newAgentGroupId,
+      displayName,
+      agentView ? {} : { session_mode: 'shared', threads: null },
+    );
   } catch (err) {
     throw asFlowError(err, 'dm-wire');
   }
@@ -581,7 +590,7 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
   // and the caller composes a shared room later via create_room.
   let roomChannelId: string | undefined;
   if (args.room !== 'none') {
-    const sourceGroupName = getAgentGroup(sourceGroupId)?.name ?? sourceGroupId;
+    const sourceGroupName = (await getAgentGroup(sourceGroupId))?.name ?? sourceGroupId;
     const newParticipant: RoomParticipant = {
       instanceKey,
       botUserId: newBotUserId,
@@ -616,9 +625,9 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
     // out-of-process finish path has no origin session to nudge. The room
     // destination was projected into the live session in S12.
     if (room.created && args.originSession) {
-      const roomMg = getMessagingGroupByPlatform('slack', `slack:${roomChannelId}`, originInstanceKey);
-      const roomDest = roomMg ? getDestinationByTarget(sourceGroupId, 'channel', roomMg.id) : undefined;
-      notifyAgent(
+      const roomMg = await getMessagingGroupByPlatform('slack', `slack:${roomChannelId}`, originInstanceKey);
+      const roomDest = roomMg ? await getDestinationByTarget(sourceGroupId, 'channel', roomMg.id) : undefined;
+      await notifyAgent(
         args.originSession,
         roomIntroNudgeText({
           newAgentName: displayName,
@@ -662,8 +671,10 @@ export async function runSlackAgentFlow(args: {
 }): Promise<OrchestrateSuccess> {
   const { content, session, newAgentGroupId, slug } = args;
   const displayName =
-    typeof content.name === 'string' && content.name ? content.name : (getAgentGroup(newAgentGroupId)?.name ?? slug);
-  const originMg = session.messaging_group_id ? getMessagingGroup(session.messaging_group_id) : undefined;
+    typeof content.name === 'string' && content.name
+      ? content.name
+      : ((await getAgentGroup(newAgentGroupId))?.name ?? slug);
+  const originMg = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : undefined;
   return runFlow({
     slug,
     displayName,
@@ -707,7 +718,7 @@ export async function finishSlackAgentFlow(args: {
 }): Promise<OrchestrateSuccess> {
   return runFlow({
     slug: args.slug,
-    displayName: getAgentGroup(args.newAgentGroupId)?.name ?? args.slug,
+    displayName: (await getAgentGroup(args.newAgentGroupId))?.name ?? args.slug,
     sourceGroupId: args.sourceGroupId,
     newAgentGroupId: args.newAgentGroupId,
     originInstanceKey: args.originInstanceKey ?? 'slack',

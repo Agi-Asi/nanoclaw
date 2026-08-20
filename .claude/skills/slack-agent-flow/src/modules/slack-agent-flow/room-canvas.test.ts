@@ -138,32 +138,32 @@ describe('wireCanvasComments', () => {
     CREATOR,
   ];
 
-  beforeEach(() => {
-    const db = initTestDb();
-    runMigrations(db);
+  beforeEach(async () => {
+    const db = await initTestDb();
+    await runMigrations(db);
     const now = new Date().toISOString();
     for (const [id, name, folder] of [
       ['ag-pixel', 'Pixel', 'pixel'],
       ['ag-andy', 'Andy', 'andy'],
       ['ag-mark', 'Mark', 'mark'],
     ] as const) {
-      createAgentGroup({ id, name, folder, agent_provider: null, created_at: now });
+      await createAgentGroup({ id, name, folder, agent_provider: null, created_at: now });
     }
   });
 
-  afterEach(() => {
-    closeDb();
+  afterEach(async () => {
+    await closeDb();
   });
 
-  it('wires EVERY participating instance: creator pattern-engage, siblings mention/accumulate', () => {
-    const shadowId = wireCanvasComments('F0CANVAS1', CREATOR, PARTICIPANTS, 'Pixel room');
+  it('wires EVERY participating instance: creator pattern-engage, siblings mention/accumulate', async () => {
+    const shadowId = await wireCanvasComments('F0CANVAS1', CREATOR, PARTICIPANTS, 'Pixel room');
 
     expect(shadowId).toBe('C0CANVAS1');
     // One mg row PER instance (router lookup is exact-on-instance), all public.
-    const all = getAllMessagingGroups().filter((m) => m.platform_id === 'slack:C0CANVAS1');
+    const all = (await getAllMessagingGroups()).filter((m) => m.platform_id === 'slack:C0CANVAS1');
     expect(all).toHaveLength(3);
     for (const p of PARTICIPANTS) {
-      const mg = getMessagingGroupByPlatform('slack', 'slack:C0CANVAS1', p.instanceKey);
+      const mg = await getMessagingGroupByPlatform('slack', 'slack:C0CANVAS1', p.instanceKey);
       expect(mg).toMatchObject({
         channel_type: 'slack',
         instance: p.instanceKey,
@@ -171,11 +171,11 @@ describe('wireCanvasComments', () => {
         is_group: 1,
         unknown_sender_policy: 'public',
       });
-      expect(getMessagingGroupAgents(mg!.id)).toHaveLength(1);
+      expect(await getMessagingGroupAgents(mg!.id)).toHaveLength(1);
     }
     // Creator = default responder for anchored comments.
-    const creatorMg = getMessagingGroupByPlatform('slack', 'slack:C0CANVAS1', 'slack-pixel')!;
-    expect(getMessagingGroupAgentByPair(creatorMg.id, 'ag-pixel')).toMatchObject({
+    const creatorMg = (await getMessagingGroupByPlatform('slack', 'slack:C0CANVAS1', 'slack-pixel'))!;
+    expect(await getMessagingGroupAgentByPair(creatorMg.id, 'ag-pixel')).toMatchObject({
       engage_mode: 'pattern',
       engage_pattern: '.',
       sender_scope: 'all',
@@ -188,8 +188,8 @@ describe('wireCanvasComments', () => {
       { instanceKey: 'slack', agentGroupId: 'ag-andy' },
       { instanceKey: 'slack-mark', agentGroupId: 'ag-mark' },
     ]) {
-      const mg = getMessagingGroupByPlatform('slack', 'slack:C0CANVAS1', sibling.instanceKey)!;
-      expect(getMessagingGroupAgentByPair(mg.id, sibling.agentGroupId)).toMatchObject({
+      const mg = (await getMessagingGroupByPlatform('slack', 'slack:C0CANVAS1', sibling.instanceKey))!;
+      expect(await getMessagingGroupAgentByPair(mg.id, sibling.agentGroupId)).toMatchObject({
         engage_mode: 'mention',
         engage_pattern: null,
         sender_scope: 'all',
@@ -200,29 +200,29 @@ describe('wireCanvasComments', () => {
     }
   });
 
-  it('is idempotent: a second call creates no new rows', () => {
-    wireCanvasComments('F0CANVAS1', CREATOR, PARTICIPANTS, 'Pixel room');
-    const mgCount = getAllMessagingGroups().length;
-    const mg = getMessagingGroupByPlatform('slack', 'slack:C0CANVAS1', 'slack-pixel')!;
-    const wiringId = getMessagingGroupAgentByPair(mg.id, 'ag-pixel')!.id;
+  it('is idempotent: a second call creates no new rows', async () => {
+    await wireCanvasComments('F0CANVAS1', CREATOR, PARTICIPANTS, 'Pixel room');
+    const mgCount = (await getAllMessagingGroups()).length;
+    const mg = (await getMessagingGroupByPlatform('slack', 'slack:C0CANVAS1', 'slack-pixel'))!;
+    const wiringId = (await getMessagingGroupAgentByPair(mg.id, 'ag-pixel'))!.id;
 
-    const second = wireCanvasComments('F0CANVAS1', CREATOR, PARTICIPANTS, 'Pixel room');
+    const second = await wireCanvasComments('F0CANVAS1', CREATOR, PARTICIPANTS, 'Pixel room');
 
     expect(second).toBe('C0CANVAS1');
-    expect(getAllMessagingGroups().length).toBe(mgCount);
-    expect(getMessagingGroupAgents(mg.id)).toHaveLength(1);
-    expect(getMessagingGroupAgentByPair(mg.id, 'ag-pixel')!.id).toBe(wiringId);
+    expect((await getAllMessagingGroups()).length).toBe(mgCount);
+    expect(await getMessagingGroupAgents(mg.id)).toHaveLength(1);
+    expect((await getMessagingGroupAgentByPair(mg.id, 'ag-pixel'))!.id).toBe(wiringId);
   });
 
-  it('returns undefined and writes nothing on an invalid canvas id shape', () => {
-    const before = getAllMessagingGroups().length;
-    expect(wireCanvasComments('not-a-canvas', CREATOR, PARTICIPANTS, 'Pixel room')).toBeUndefined();
-    expect(getAllMessagingGroups().length).toBe(before);
+  it('returns undefined and writes nothing on an invalid canvas id shape', async () => {
+    const before = (await getAllMessagingGroups()).length;
+    expect(await wireCanvasComments('not-a-canvas', CREATOR, PARTICIPANTS, 'Pixel room')).toBeUndefined();
+    expect((await getAllMessagingGroups()).length).toBe(before);
   });
 
-  it('never throws: a DB failure (unknown agent group breaks the FK) returns undefined', () => {
+  it('never throws: a DB failure (unknown agent group breaks the FK) returns undefined', async () => {
     expect(
-      wireCanvasComments('F0CANVAS2', { instanceKey: 'slack', agentGroupId: 'ag-missing' }, [], 'X'),
+      await wireCanvasComments('F0CANVAS2', { instanceKey: 'slack', agentGroupId: 'ag-missing' }, [], 'X'),
     ).toBeUndefined();
   });
 });

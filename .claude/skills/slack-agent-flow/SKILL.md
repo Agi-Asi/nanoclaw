@@ -57,17 +57,76 @@ test -f src/channels/slack.ts && test -f src/channels/slack-lib.ts && test -f sr
 ### 2. Check the trunk extension seams
 
 Everything this flow plugs into is standard trunk API — the adapter hot-start
-entry, the delivery batch preview, the create-agent notify option, the
-container tool-extension hook, and the setup wizard's channel registries. This
-is a trunk **version requirement, not an edit**: if the check below fails, the
+entry, the delivery batch preview, the mailbox delivery/session helpers, the
+create-agent notify option, the decline-and-notify overrides, the container
+tool-extension hook, and the setup wizard's channel registries. This is a
+trunk **version requirement, not an edit**: if the check below fails, the
 NanoClaw trunk is too old for this skill — bring the install up to date
 (`/update-nanoclaw`) instead of patching any of these files by hand:
 
 ```nc:run effect:check
-grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/claude-md-compose.ts
+grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "session: Session) => Promise<void>" src/delivery.ts && grep -q "trigger?: boolean" src/session-manager.ts && grep -q "findCliResponse" container/agent-runner/src/db/messages-in.ts && grep -q "Promise<number>" container/agent-runner/src/db/messages-out.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "dedupeKey?: string" src/modules/permissions/sender-approval.ts && grep -q "declineText?: string" src/modules/permissions/sender-approval.ts && grep -q "fyiText?: string" src/modules/permissions/sender-approval.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/claude-md-compose.ts && grep -q "await action.decide" src/guard/guard.ts
 ```
 
-### 3. Copy the flow payload
+The last term requires an async-capable guard seam: the flow's `create_agent`
+and room-action guards read container config asynchronously, and on a trunk
+whose `guard()` does not await `decide` a returned Promise would be treated
+as an allow — the check turns that silent fail-open into a fail-fast here.
+
+### 3. Copy the shared feature payload from the channels branch
+
+The agents experience needs more than the base adapter: the room-membership
+module (invite-to-room adoption, group-DM fork carry-over, detach on removal,
+owner-presence access rule), canvas actions + the container `canvas` tool +
+the `canvas-work` skill (section-scoped canvas edits/reads via the session's
+own bot identity), DM onboarding (get-started prompts, per-thread DM titles),
+and their `env-file.ts` dotenv plumbing. They live on the `channels` branch;
+fetch and copy them into place (overwrite — the branch is canonical):
+
+```nc:copy from-branch:channels
+src/env-file.ts
+src/env-file.test.ts
+src/modules/slack-room-membership/index.ts
+src/modules/slack-room-membership/membership.ts
+src/modules/slack-room-membership/membership.test.ts
+src/modules/slack-room-membership/env-file.ts
+src/modules/slack-room-membership/env-file.test.ts
+src/modules/canvas-actions/index.ts
+src/modules/canvas-actions/handlers.ts
+src/modules/canvas-actions/canvas-api.ts
+src/modules/canvas-actions/canvas-actions.test.ts
+src/modules/slack-onboarding/index.ts
+src/modules/slack-onboarding/onboarding.test.ts
+src/modules/slack-onboarding/thread-title.test.ts
+container/agent-runner/src/mcp-tools/canvas.ts
+container/agent-runner/src/mcp-tools/canvas.instructions.md
+container/agent-runner/src/mcp-tools/canvas.test.ts
+container/skills/slack-construct/SKILL.md
+container/skills/slack-construct/instructions.md
+container/skills/canvas-work/SKILL.md
+container/skills/welcome/addenda/slack.md
+```
+
+The welcome addendum rides with the agents feature deliberately: its tour
+content describes rooms, canvases, suggested-prompt DMs, and the agents
+access model — none of which exist on a base `/add-slack` install.
+
+Register the three host modules in the modules barrel and the canvas tool in
+the container tool barrel (each append is skipped if already present; these
+must precede the flow module's own barrel line, which the fence order here
+guarantees):
+
+```nc:append to:src/modules/index.ts
+import './slack-room-membership/index.js';
+import './canvas-actions/index.js';
+import './slack-onboarding/index.js';
+```
+
+```nc:append to:container/agent-runner/src/mcp-tools/index.ts
+import './canvas.js';
+```
+
+### 4. Copy the flow payload
 
 This skill ships its payload alongside this document; copy the files into the
 tree at the same relative paths (overwrite; the skill's copies are canonical).
@@ -106,7 +165,7 @@ container/skills/slack-construct-agents/instructions.md
 container/skills/welcome/addenda/teams-tour.md
 ```
 
-### 4. Register the host module
+### 5. Register the host module
 
 Append the self-registration import to the module barrel (skipped if the line
 is already present). It must evaluate after the agent-to-agent module's own
@@ -117,7 +176,7 @@ handler re-registers over upstream's:
 import './slack-agent-flow/index.js';
 ```
 
-### 5. Register the container room tools
+### 6. Register the container room tools
 
 Append the tool-module import to the container MCP-tools barrel (skipped if
 already present). The module registers `create_room` / `add_to_room` and
@@ -129,7 +188,7 @@ guarantees it:
 import './rooms.js';
 ```
 
-### 6. Build
+### 7. Build
 
 The build guards every typed call the flow makes into trunk (delivery
 registration, DB helpers, channel defaults, the shared Slack lib) against
@@ -139,20 +198,22 @@ drift:
 pnpm run build
 ```
 
-### 7. Validate
+### 8. Validate
 
-The flow's own tests plus the trunk hot-start seam's test (host side), then
-the container room-tools test, which also pins the `create_agent` extension:
+The flow's own tests, the shared feature payload's module tests, and the trunk
+hot-start seam's test run on the host. The room-tool tests run through the
+already-built agent image, so setup does not require Bun on the host; they also
+pin the `create_agent` extension:
 
 ```nc:run effect:test
-pnpm exec vitest run src/modules/slack-agent-flow src/channels/adapter-hot-start.test.ts
+pnpm exec vitest run src/modules/slack-agent-flow src/modules/slack-room-membership src/modules/canvas-actions src/modules/slack-onboarding src/env-file.test.ts src/channels/adapter-hot-start.test.ts
 ```
 
 ```nc:run effect:test
-cd container/agent-runner && bun test src/mcp-tools/rooms.test.ts
+source "$PWD/setup/lib/install-slug.sh" && "${CONTAINER_RUNTIME:-docker}" run --rm --entrypoint bun --workdir /app --volume "$PWD/container/agent-runner/src:/app/src:ro" "$(container_image_base):latest" test --preload /app/src/modules/index.ts src/mcp-tools/rooms.test.ts src/mcp-tools/canvas.test.ts
 ```
 
-### 8. Restart the host
+### 9. Restart the host
 
 The flow module registers at boot, and container mounts are read-only at
 runtime — restart so the running host picks everything up (new sessions see
@@ -226,10 +287,15 @@ bash setup/lib/restart.sh
   It runs outside the host process, so it cannot hot-start the adapter:
   `--restart` runs `bash setup/lib/restart.sh` for you, otherwise it prints
   the restart instruction.
-- **Setup-wizard leg.** On a trunk new enough for step 2's check, the setup
-  wizard's Slack arm already consults the managed-provisioning pre-step and
-  companion-skill declarations (`setup/channels/slack-auto.ts`, registered
-  through `setup/channels/companions.ts`) — that leg ships with trunk, and
+
+- **Setup-wizard leg.** On a trunk new enough for step 2's check, running
+  `bash nanoclaw.sh --slack-agents` does the whole install: the flag registers
+  the managed-provisioning pre-step and the companion list
+  (`slack-a2a-rooms`, then this skill) at wizard boot
+  (`setup/channels/slack-auto-register.ts` → `setup/channels/companions.ts`),
+  so the wizard provisions the first app, applies `/add-slack`, then applies
+  both feature skills with one deferred restart. Without the flag, setup
+  installs the base Slack experience only. That leg ships with trunk, and
   this skill does not touch it.
 
 Everything the flow creates at runtime is user data, not skill payload: agent

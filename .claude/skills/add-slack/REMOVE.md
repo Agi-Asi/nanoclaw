@@ -7,11 +7,6 @@ Every step is idempotent — safe to re-run.
 Delete the appended lines (skip any already gone):
 
 - `src/channels/index.ts`: `import './slack.js';` and `import './slack-a2a-guard.js';`
-- `src/modules/index.ts`: `import './slack-room-membership/index.js';`,
-  `import './canvas-actions/index.js';`, `import './slack-onboarding/index.js';`
-- `container/agent-runner/src/mcp-tools/index.ts`: `import './canvas.js';`
-- `setup/channels/companions.ts`: `import { SLACK_COMPANION_SKILLS } from './slack-companions.js';`
-  and `registerCompanionSkills('slack', SLACK_COMPANION_SKILLS);`
 
 ## 2. Remove the payload files
 
@@ -20,20 +15,9 @@ rm -f src/channels/slack.ts src/channels/slack-lib.ts src/channels/slack-lib.tes
   src/channels/slack-a2a-guard.ts src/channels/slack-a2a-guard.test.ts \
   src/channels/slack-registration.test.ts \
   src/channels/slack-instances-registration.test.ts \
-  src/env-file.ts src/env-file.test.ts \
-  container/agent-runner/src/mcp-tools/canvas.ts \
-  container/agent-runner/src/mcp-tools/canvas.instructions.md \
-  container/agent-runner/src/mcp-tools/canvas.test.ts \
-  container/skills/slack-formatting/SKILL.md \
-  container/skills/welcome/addenda/slack.md \
-  setup/channels/slack-companions.ts
-rm -rf src/modules/slack-room-membership src/modules/canvas-actions \
-  src/modules/slack-onboarding container/skills/canvas-work \
-  container/skills/slack-construct
+  src/provisioning/slack-app.ts src/provisioning/slack-app.test.ts \
+  container/skills/slack-formatting/SKILL.md
 ```
-
-Caution: `src/env-file.ts` is shared plumbing — leave it in place if another
-installed skill (e.g. the agent-provisioning flow) still imports it.
 
 ## 3. Remove credentials
 
@@ -49,10 +33,11 @@ instances were configured, also remove `SLACK_INSTANCES` and every suffixed
 pnpm uninstall @chat-adapter/slack
 ```
 
-## 5. Companion skills
+## 5. Feature skills
 
-If the companion skill was applied, remove it too (its own REMOVE.md):
-`slack-a2a-rooms`.
+If the agents feature was applied on top, remove those skills first:
+`slack-agent-flow` (its REMOVE.md), then `slack-a2a-rooms` (removal steps in
+its SKILL.md).
 
 ## 6. Rebuild and restart
 

@@ -7,11 +7,10 @@
  * system note (a `canvas_response` inbound row).
  *
  * canvas_read is blocking (ncl / ask_user_question pattern): it writes a
- * `canvas_read` system action, then polls inbound.db by requestId for the
+ * `canvas_read` system action, then polls the mailbox by requestId for the
  * host's response row and returns the canvas text inline.
  */
-import { openInboundDb, getOutboundDb } from '../db/connection.js';
-import { markCompleted, type MessageInRow } from '../db/messages-in.js';
+import { findCliResponse, markCompleted } from '../db/messages-in.js';
 import { writeMessageOut } from '../db/messages-out.js';
 import { registerTools } from './server.js';
 import type { McpToolDefinition } from './types.js';
@@ -39,26 +38,6 @@ function sleep(ms: number): Promise<void> {
 const EDIT_OPS = ['append', 'replace_section', 'insert_after_section'] as const;
 type EditOp = (typeof EDIT_OPS)[number];
 
-/**
- * Find the host's canvas_response row for a requestId (findQuestionResponse
- * pattern — pending inbound row, not yet acked in processing_ack).
- */
-function findCanvasResponse(requestId: string): MessageInRow | undefined {
-  const inbound = openInboundDb();
-  const outbound = getOutboundDb();
-  try {
-    const response = inbound
-      .prepare("SELECT * FROM messages_in WHERE status = 'pending' AND content LIKE ?")
-      .get(`%"requestId":"${requestId}"%`) as MessageInRow | undefined;
-    if (!response) return undefined;
-    const acked = outbound.prepare('SELECT 1 FROM processing_ack WHERE message_id = ?').get(response.id);
-    if (acked) return undefined;
-    return response;
-  } finally {
-    inbound.close();
-  }
-}
-
 export const canvasUpdate: McpToolDefinition = {
   tool: {
     name: 'canvas_update',
@@ -80,8 +59,7 @@ export const canvasUpdate: McpToolDefinition = {
         markdown: { type: 'string', description: 'Markdown content for the edit' },
         section_text: {
           type: 'string',
-          description:
-            "Required for replace_section / insert_after_section: the target section's exact heading text",
+          description: "Required for replace_section / insert_after_section: the target section's exact heading text",
         },
       },
       required: ['canvas_id', 'op', 'markdown'],
@@ -100,7 +78,7 @@ export const canvasUpdate: McpToolDefinition = {
     }
 
     const requestId = generateId();
-    writeMessageOut({
+    await writeMessageOut({
       id: requestId,
       kind: 'system',
       content: JSON.stringify({
@@ -140,7 +118,7 @@ export const canvasRead: McpToolDefinition = {
     const timeout = ((args.timeout as number) || 20) * 1000;
 
     const requestId = generateId();
-    writeMessageOut({
+    await writeMessageOut({
       id: requestId,
       kind: 'system',
       content: JSON.stringify({
@@ -154,7 +132,7 @@ export const canvasRead: McpToolDefinition = {
 
     const deadline = Date.now() + timeout;
     while (Date.now() < deadline) {
-      const response = findCanvasResponse(requestId);
+      const response = findCliResponse(requestId);
       if (response) {
         markCompleted([response.id]);
         const parsed = JSON.parse(response.content) as {

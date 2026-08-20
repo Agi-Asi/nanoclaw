@@ -26,6 +26,7 @@ import { reenterGuardedDeliveryAction, registerDeliveryAction, registerDeliveryB
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { log } from '../../log.js';
+import { hasLocalTemplate } from '../../templates/registry.js';
 import type { Session } from '../../types.js';
 import { getDestinationByName, normalizeName } from '../agent-to-agent/db/agent-destinations.js';
 import { createAgent, requestCreateAgentHold, validateCreateAgent } from '../agent-to-agent/create-agent.js';
@@ -89,7 +90,18 @@ registerDeliveryBatchPreview(async (batch, session) => {
   log.info('Avatar prefetch started for multi-create batch', { count: creates.length });
 });
 
-function successText(name: string, roomChannelId: string | undefined, deferredInstall = false): string {
+function successText(
+  name: string,
+  roomChannelId: string | undefined,
+  template?: { ref: string; commit?: string },
+  deferredInstall = false,
+): string {
+  // Provenance rides the ONE completion signal the Slack path emits (the
+  // upstream created-notify is suppressed here), so the requester still learns
+  // which template and which commit the agent was stamped from.
+  const stamped = template
+    ? ` Stamped from template "${template.ref}"${template.commit ? ` (commit ${template.commit.slice(0, 7)})` : ' (local copy)'}.`
+    : '';
   // The user already knows they were waiting on their workspace — name what
   // unblocked it so the relay reads as an ending, not a fresh announcement.
   const installed = deferredInstall ? ' The workspace approved the install, which is what the wait was for.' : '';
@@ -100,6 +112,7 @@ function successText(name: string, roomChannelId: string | undefined, deferredIn
       `Agent "${name}" is live on Slack with its own bot and a DM with the operator. No shared room was ` +
       `opened (room:'none') — when the set is complete, open ONE room for all of them with create_room. ` +
       `It came online just now; if it doesn't respond within a minute, an operator can run: bash setup/lib/restart.sh` +
+      stamped +
       installed
     );
   }
@@ -107,6 +120,7 @@ function successText(name: string, roomChannelId: string | undefined, deferredIn
     `Agent "${name}" is live on Slack with its own bot. I opened a DM between it and the operator, ` +
     `and a shared room (${roomChannelId}) where you, I, and it can talk — @-mention it there to engage it. ` +
     `It came online just now; if it doesn't respond within a minute, an operator can run: bash setup/lib/restart.sh` +
+    stamped +
     installed
   );
 }
@@ -131,16 +145,28 @@ function failureText(
   );
 }
 
-/** Run the Slack leg for an already-created agent group and report the outcome. */
+/**
+ * Run the Slack leg for an already-created agent group and report the outcome.
+ *
+ * `template` is the stamping result createAgent just returned, so it is
+ * present on a fresh create and absent on a resume — by then the stamping is
+ * long done and its commit is not ours to restate.
+ */
 async function runSlackLeg(
   content: Record<string, unknown>,
   session: Session,
-  args: { name: string; localName: string; newAgentGroupId: string; slug: string },
+  args: {
+    name: string;
+    localName: string;
+    newAgentGroupId: string;
+    slug: string;
+    template?: { ref: string; commit?: string };
+  },
 ): Promise<void> {
   const { name, localName, newAgentGroupId, slug } = args;
   try {
     const r = await runSlackAgentFlow({ content, session, newAgentGroupId, slug });
-    await notifyAgent(session, successText(name, r.roomChannelId, r.deferredInstall));
+    await notifyAgent(session, successText(name, r.roomChannelId, args.template, r.deferredInstall));
   } catch (err) {
     // SlackApiError carries the flow step id its call site passed to the
     // shared Slack lib — surface it like a typed flow step.
@@ -188,7 +214,7 @@ async function slackAwareCreateAgent(content: Record<string, unknown>, session: 
   // report "done" ~a minute early — this wrapper's successText/failureText
   // is the only completion signal. Upstream error notifies (collision,
   // invalid path) still fire either way.
-  await createAgent(content, session, slackOrigin ? { suppressCreatedNotify: true } : undefined);
+  const outcome = await createAgent(content, session, slackOrigin ? { suppressCreatedNotify: true } : undefined);
 
   const after = await getDestinationByName(session.agent_group_id, localName);
   // Creation bailed or collided — upstream already answered the requester.
@@ -201,6 +227,7 @@ async function slackAwareCreateAgent(content: Record<string, unknown>, session: 
     localName,
     newAgentGroupId: after.target_id,
     slug: await dedupeSlug(deriveInstanceSlug(name), after.target_id),
+    template: outcome?.template,
   });
 }
 
@@ -216,9 +243,18 @@ async function requestSlackCreateAgentHold(content: Record<string, unknown>, ses
   }
   const name = typeof content.name === 'string' ? content.name : '';
   const instructions = typeof content.instructions === 'string' ? content.instructions : null;
+  const template = typeof content.template === 'string' && content.template ? content.template : undefined;
   const sourceGroup = await getAgentGroup(session.agent_group_id);
   if (!sourceGroup) return;
 
+  // Same sentence as trunk's requestCreateAgentHold: the admin must see the
+  // template ref and whether it will be fetched or is already local — the
+  // Slack card is the only card a Slack-origin templated create ever shows.
+  const templateNote = template
+    ? ` It will be stamped from template "${template}" (${
+        hasLocalTemplate(template) ? 'using the existing local copy' : 'fetched from the public template registry'
+      }).`
+    : '';
   await requestApproval({
     session,
     agentName: sourceGroup.name,
@@ -234,11 +270,15 @@ async function requestSlackCreateAgentHold(content: Record<string, unknown>, ses
       // room:'none' must survive the hold too — dropping it would grow a
       // room the multi-create pattern deliberately skipped.
       ...(content.room === 'none' ? { room: 'none' } : {}),
+      // The template ref is the grant binding: the guard matches grant.template
+      // against the request, and the approved replay stamps from this payload.
+      // Dropping it would both break that match and create a plain agent.
+      ...(template ? { template } : {}),
     },
     title: `Create agent: ${name}`,
     question:
       `Agent "${sourceGroup.name}" wants to create a new sub-agent "${name}" AND provision a dedicated ` +
-      `Slack bot for it (new Slack app, DM with you, and a shared three-way room). Approve?`,
+      `Slack bot for it (new Slack app, DM with you, and a shared three-way room).${templateNote} Approve?`,
   });
 }
 

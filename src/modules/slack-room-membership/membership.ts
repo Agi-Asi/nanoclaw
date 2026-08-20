@@ -14,7 +14,7 @@
  *     agent introduces itself. Since B2/D24 the card is the FALLBACK only:
  *     requestChannelApproval consults slackChannelCardInterceptor (below)
  *     first — owner present in the room → auto-wire 'public' +
- *     mention/accumulate, no card; stranger 1:1 DMs → decline-and-notify.
+ *     mention/accumulate, no card; 1:1 DMs from non-owners/admins → decline-and-notify.
  *  2. MPIM-fork carry-over: Slack NEVER adds members to a group DM in place —
  *     it forks a NEW conversation. Before firing the card in case 1, if the
  *     joined channel is an MPIM whose member set is a superset of an existing
@@ -64,9 +64,8 @@ import { log } from '../../log.js';
 import { routeInbound } from '../../router.js';
 import { writeSessionMessage } from '../../session-manager.js';
 import type { MessagingGroup } from '../../types.js';
-import { canAccessAgentGroup } from '../permissions/access.js';
 import { requestChannelApproval } from '../permissions/channel-approval.js';
-import { getOwners } from '../permissions/db/user-roles.js';
+import { getOwners, hasAdminPrivilege } from '../permissions/db/user-roles.js';
 import { declineAndNotify } from '../permissions/sender-approval.js';
 import { appendToEnvList, readEnvValue } from './env-file.js';
 
@@ -631,7 +630,7 @@ function senderFromEvent(event: InboundEvent): { userId: string | null; name: st
  *     (the declaration lives on the channels branch), so rows carrying that
  *     stale default decline exactly like 'decline_notify' ones and get
  *     stamped 'decline_notify' so the row matches the behavior. Deliberate
- *     operator overrides ('strict', 'public') and known/privileged senders
+ *     operator overrides ('strict', 'public') and owners/admins
  *     keep the card.
  *   - Group/MPIM with the OWNER in the member list → auto-wire: mg flips to
  *     'public', the instance's agent group gets a mention/accumulate wiring
@@ -692,8 +691,8 @@ export async function slackChannelCardInterceptor(
       return 'card';
     }
     const sender = senderFromEvent(event);
-    // Known/privileged senders are never declined — their DM still cards.
-    if (sender.userId && (await canAccessAgentGroup(sender.userId, agentGroup.id)).allowed) return 'card';
+    // Owners/admins are never declined — plain channel membership does not unlock the DM.
+    if (sender.userId && (await hasAdminPrivilege(sender.userId, agentGroup.id))) return 'card';
     // Stamp the D24 default onto rows still carrying the stale declared
     // policy, so the row reflects the behavior (ncl dumps, access gate).
     if (mg.unknown_sender_policy !== 'decline_notify') {
@@ -708,12 +707,21 @@ export async function slackChannelCardInterceptor(
       messaging_group_id: mg.id,
       agent_group_id: agentGroup.id,
     });
+    // The default FYI hints `ncl members add`, but membership no
+    // longer unlocks a Slack 1:1 DM — following it would just loop the sender
+    // back into this decline. Point the owner at the remedy that works.
+    const senderDisplay = sender.name ?? sender.userId ?? 'An unknown sender';
+    const who =
+      sender.userId && senderDisplay !== sender.userId ? `${senderDisplay} (${sender.userId})` : senderDisplay;
     await declineAndNotify({
       messagingGroupId: mg.id,
       agentGroupId: agentGroup.id,
       senderIdentity: sender.userId,
       senderName: sender.name,
       event,
+      fyiText:
+        `FYI: ${who} DMed your agent on Slack — I sent a polite decline. ` +
+        'Slack DMs are admin-only — allow them with `ncl roles grant`.',
     });
     return 'handled';
   }

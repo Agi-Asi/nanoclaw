@@ -122,15 +122,20 @@ const {
     getSessionsByAgentGroup(agentGroupId: string): any[] {
       return state.sessions.filter((s) => s.agent_group_id === agentGroupId);
     },
-    // user-roles (+ the access fake reads the same rows)
+    // user-roles
     grantRole(row: any): void {
       state.roles.push(row);
     },
     getOwners(): any[] {
       return state.roles.filter((r) => r.role === 'owner');
     },
-    hasRole(userId: string): boolean {
-      return state.roles.some((r) => r.user_id === userId);
+    hasAdminPrivilege(userId: string, agentGroupId: string): boolean {
+      return state.roles.some(
+        (r) =>
+          r.user_id === userId &&
+          (r.role === 'owner' ||
+            (r.role === 'admin' && (r.agent_group_id === null || r.agent_group_id === agentGroupId))),
+      );
     },
   };
   /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -175,9 +180,6 @@ vi.mock('../../cli/resources/destinations.js', () => ({
 vi.mock('../../channels/channel-defaults.js', () => ({
   resolveUnknownSenderPolicy: (_instance: string, isGroup: boolean) => (isGroup ? 'request_approval' : 'strict'),
 }));
-vi.mock('../permissions/access.js', () => ({
-  canAccessAgentGroup: (userId: string) => ({ allowed: fakeDb.hasRole(userId) }),
-}));
 vi.mock('../../db/dropped-messages.js', () => ({
   recordDroppedMessage: (...a: unknown[]) => mockRecordDropped(...a),
 }));
@@ -205,6 +207,7 @@ vi.mock('../../db/sessions.js', () => ({
 vi.mock('../permissions/db/user-roles.js', () => ({
   grantRole: fakeDb.grantRole,
   getOwners: fakeDb.getOwners,
+  hasAdminPrivilege: fakeDb.hasAdminPrivilege,
 }));
 
 import { createAgentGroup } from '../../db/agent-groups.js';
@@ -790,6 +793,9 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
       senderIdentity: 'slack:U0STRANGER',
       senderName: 'Stranger',
       event,
+      fyiText:
+        'FYI: Stranger (slack:U0STRANGER) DMed your agent on Slack — I sent a polite decline. ' +
+        'Slack DMs are admin-only — allow them with `ncl roles grant`.',
     });
     expect(mockRecordDropped).toHaveBeenCalledTimes(1);
     expect(await getMessagingGroupAgents(dm.id)).toHaveLength(0);
@@ -809,6 +815,53 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
     const event = mentionEvent('slack:D0OWNER', { isGroup: false, senderId: OPERATOR, senderName: 'Gavriel' });
     expect(await intercept(dm, event)).toBe('card');
     expect(mockDeclineAndNotify).not.toHaveBeenCalled();
+  });
+
+  it('admin (not owner) of the target agent group DM: still cards', async () => {
+    await seedOwnerAndInstanceDm();
+    const admin = 'U0ADMIN';
+    await grantRole({
+      user_id: `slack:${admin}`,
+      role: 'admin',
+      agent_group_id: 'ag-andy',
+      granted_by: null,
+      granted_at: now(),
+    });
+    const dm = await mg({
+      id: 'mg-dm-admin',
+      platform_id: 'slack:D0ADMIN',
+      is_group: 0,
+      unknown_sender_policy: 'decline_notify',
+    });
+    mockApi.slackConversationsInfo.mockResolvedValue({ isMpim: false, creator: admin });
+
+    const event = mentionEvent('slack:D0ADMIN', { isGroup: false, senderId: admin, senderName: 'Admin' });
+    expect(await intercept(dm, event)).toBe('card');
+    expect(mockDeclineAndNotify).not.toHaveBeenCalled();
+  });
+
+  it('known agent-group member without admin privilege is declined, no card', async () => {
+    await seedOwnerAndInstanceDm();
+    const dm = await mg({
+      id: 'mg-dm-member',
+      platform_id: 'slack:D0MEMBER',
+      is_group: 0,
+      unknown_sender_policy: 'decline_notify',
+    });
+    mockApi.slackConversationsInfo.mockResolvedValue({ isMpim: false, creator: 'U0MEMBER' });
+
+    // A channel-approved member with no admin/owner role must still be declined.
+    const event = mentionEvent('slack:D0MEMBER', { isGroup: false, senderId: 'U0MEMBER', senderName: 'Member' });
+    expect(await intercept(dm, event)).toBe('handled');
+    expect(mockDeclineAndNotify).toHaveBeenCalledTimes(1);
+    // The owner FYI must hint the remedy that actually unlocks a Slack DM
+    // with the admin gate (`ncl roles grant`) — never `ncl members add`, which no
+    // longer opens the DM and would loop the sender back into this decline.
+    const fyi = (mockDeclineAndNotify.mock.calls[0][0] as { fyiText?: string }).fyiText ?? '';
+    expect(fyi).toContain('admin-only');
+    expect(fyi).toContain('ncl roles grant');
+    expect(fyi).not.toContain('ncl members add');
+    expect(await getMessagingGroupAgents(dm.id)).toHaveLength(0);
   });
 
   it('stranger 1:1 DM with the stale request_approval default: declines and stamps the row decline_notify', async () => {
@@ -831,6 +884,7 @@ describe('slack channel-card interceptor — owner-presence rule (B2/D24)', () =
       senderIdentity: 'slack:U0STRANGER',
       senderName: 'Stranger',
       event,
+      fyiText: expect.stringContaining('allow them with `ncl roles grant`'),
     });
     // The D24 flip is stamped onto the row so the DB matches the behavior.
     expect(await getMessagingGroup(dm.id)).toMatchObject({ unknown_sender_policy: 'decline_notify' });

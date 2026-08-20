@@ -34,3 +34,44 @@ describe('the Tavily MCP bridge is installed in the agent image', () => {
     expect(bridge?.version).toMatch(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
   });
 });
+
+describe('the Tavily MCP registration arguments are correctly configured', () => {
+  const root = repoRoot();
+  const skillMd = fs.readFileSync(path.join(root, '.claude', 'skills', 'add-tavily-tool', 'SKILL.md'), 'utf8');
+
+  it('contains the keyless authorization header', () => {
+    expect(skillMd).toContain('X-Tavily-Access-Mode:keyless');
+  });
+
+  it('contains the client-name header', () => {
+    expect(skillMd).toContain('X-Client-Name:nanoclaw');
+  });
+
+  it('filters out all three restricted tools (crawl, map, research)', () => {
+    expect(skillMd).toContain('--ignore-tool');
+    expect(skillMd).toContain('tavily_crawl');
+    expect(skillMd).toContain('tavily_map');
+    expect(skillMd).toContain('tavily_research');
+  });
+});
+
+describe('the Phase 5 upgrade block is correctly configured', () => {
+  const root = repoRoot();
+  const upgradeInstructions = fs.readFileSync(
+    path.join(root, '.claude', 'skills', 'add-tavily-tool', 'upgrade-instructions.md'),
+    'utf8',
+  );
+
+  it('contains the start and end markers for idempotent replacement', () => {
+    expect(upgradeInstructions).toContain('<!-- tavily-upgrade:start -->');
+    expect(upgradeInstructions).toContain('<!-- tavily-upgrade:end -->');
+  });
+
+  it('contains the dashboard URL placeholder', () => {
+    expect(upgradeInstructions).toContain('{{ONECLI_DASHBOARD_URL}}');
+  });
+
+  it('specifies the correct deeplink path for the OneCLI secrets creation', () => {
+    expect(upgradeInstructions).toContain('/connections/secrets?create=generic&host=mcp.tavily.com');
+  });
+});

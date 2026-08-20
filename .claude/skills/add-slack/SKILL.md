@@ -92,7 +92,7 @@ behaves like Socket Mode minus the walkthrough below.
 For Socket Mode, tell the user:
 ```nc:operator when:connection=socket
 Create the Slack app (Socket Mode):
-1. Go to api.slack.com/apps → Create New App → From scratch. Name it (e.g. "NanoClaw") and pick your workspace.
+1. Go to api.slack.com/apps and create a new app using whichever creation flow is currently available (e.g. starting from scratch or from a manifest). Name it (e.g. "NanoClaw") and pick your workspace.
 2. OAuth & Permissions → add these Bot Token Scopes: chat:write, im:write, channels:history, groups:history, im:history, channels:read, groups:read, mpim:read, users:read, reactions:write, files:read, files:write.
 3. App Home → enable the Messages Tab, and check "Allow users to send Slash commands and messages from the messages tab."
 4. Basic Information → App-Level Tokens → "Generate Token and Scopes" → add the connections:write scope → copy the token (starts with xapp-).
@@ -104,7 +104,7 @@ Create the Slack app (Socket Mode):
 For webhook delivery, tell the user:
 ```nc:operator when:connection=webhook
 Create the Slack app (webhook delivery):
-1. Go to api.slack.com/apps → Create New App → From scratch. Name it (e.g. "NanoClaw") and pick your workspace.
+1. Go to api.slack.com/apps and create a new app using whichever creation flow is currently available (e.g. starting from scratch or from a manifest). Name it (e.g. "NanoClaw") and pick your workspace.
 2. OAuth & Permissions → add these Bot Token Scopes: chat:write, im:write, channels:history, groups:history, im:history, channels:read, groups:read, mpim:read, users:read, reactions:write, files:read, files:write.
 3. App Home → enable the Messages Tab, and check "Allow users to send Slash commands and messages from the messages tab."
 4. Install to Workspace, then copy the Bot User OAuth Token (starts with xoxb-).

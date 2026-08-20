@@ -96,7 +96,7 @@ vi.mock('../approvals/index.js', async () => {
 
 // Registers the wrapped create_agent delivery action — the path under test.
 // Deliberately NOT src/modules/index.ts: the upstream a2a barrel stays unloaded.
-import './index.js';
+import { deliverFailureToOrigin } from './index.js';
 import { ensureAgentRoom, finishSlackAgentFlow } from './orchestrate.js';
 import { SlackFlowError } from './types.js';
 import { getDeliveryAction } from '../../delivery.js';
@@ -651,6 +651,22 @@ describe('slack-aware create_agent — non-Slack parity', () => {
 });
 
 describe('slack-aware create_agent — failure and retry', () => {
+  it('delivers manual fallback text directly to the origin chat', async () => {
+    const deliver = vi.fn().mockResolvedValue('msg-1');
+    const text = 'Install from https://api.slack.com/apps/A0TEST/oauth';
+
+    await expect(deliverFailureToOrigin(SLACK_SESSION, text, { deliver })).resolves.toBe(true);
+
+    expect(deliver.mock.calls[0]!.slice(0, 5)).toEqual([
+      'slack',
+      'slack:D0OPDM',
+      null,
+      'chat',
+      JSON.stringify({ text }),
+    ]);
+    expect(mockNotifyWrite).not.toHaveBeenCalled();
+  });
+
   it('broker failure: group still exists, failure notify carries the finish command', async () => {
     brokerStatus = 500;
 

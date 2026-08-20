@@ -17,12 +17,18 @@
  * (superset re-open — MPIM fork), each guard-wrapped with the same
  * cli_scope trust split as create_agent (./guard.ts, ./room-actions.ts).
  *
- * The handler never touches inbound DBs (guarded handlers replay without
- * one); all requester notifications go through the approvals module's
- * notifyAgent. Token values never appear in notify texts or logs.
+ * The handler never touches inbound DBs directly (guarded handlers replay
+ * without one). Failure instructions go straight to the origin chat so an
+ * agent cannot summarize away the recovery URL; if delivery is unavailable,
+ * notifyAgent remains the fallback. Token values never appear in texts/logs.
  */
 import { SlackApiError } from '../../channels/slack-lib.js';
-import { reenterGuardedDeliveryAction, registerDeliveryAction, registerDeliveryBatchPreview } from '../../delivery.js';
+import {
+  getDeliveryAdapter,
+  reenterGuardedDeliveryAction,
+  registerDeliveryAction,
+  registerDeliveryBatchPreview,
+} from '../../delivery.js';
 import { getAgentGroup } from '../../db/agent-groups.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
 import { log } from '../../log.js';
@@ -126,6 +132,31 @@ function failureText(
   );
 }
 
+/** Deliver recovery instructions without an LLM relay that may omit the URL. */
+export async function deliverFailureToOrigin(
+  session: Session,
+  text: string,
+  adapter = getDeliveryAdapter(),
+): Promise<boolean> {
+  const origin = session.messaging_group_id ? await getMessagingGroup(session.messaging_group_id) : undefined;
+  if (!adapter || !origin) return false;
+  try {
+    await adapter.deliver(
+      origin.channel_type,
+      origin.platform_id,
+      session.thread_id,
+      'chat',
+      JSON.stringify({ text }),
+      undefined,
+      origin.instance,
+    );
+    return true;
+  } catch (err) {
+    log.warn('Direct Slack agent fallback delivery failed; notifying requester agent instead', { err });
+    return false;
+  }
+}
+
 async function slackAwareCreateAgent(content: Record<string, unknown>, session: Session): Promise<void> {
   const name = typeof content.name === 'string' ? content.name : '';
   const localName = normalizeName(name);
@@ -155,19 +186,17 @@ async function slackAwareCreateAgent(content: Record<string, unknown>, session: 
     // shared Slack lib — surface it like a typed flow step.
     const step = err instanceof SlackFlowError || err instanceof SlackApiError ? err.step : 'unknown';
     const message = err instanceof Error ? err.message : String(err);
-    await notifyAgent(
-      session,
-      failureText(
-        name,
-        localName,
-        step,
-        message,
-        after.target_id,
-        slug,
-        session.agent_group_id,
-        content.room === 'none',
-      ),
+    const failure = failureText(
+      name,
+      localName,
+      step,
+      message,
+      after.target_id,
+      slug,
+      session.agent_group_id,
+      content.room === 'none',
     );
+    if (!(await deliverFailureToOrigin(session, failure))) await notifyAgent(session, failure);
     log.error('slack-agent-flow failed', { step });
   }
 }

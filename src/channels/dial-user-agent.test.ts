@@ -87,6 +87,21 @@ describe('Dial adapter outbound send', () => {
     expect(dirs).toContain(path.dirname(process.execPath));
   });
 
+  it('never puts the working directory on PATH when the CLI path is a bare name', async () => {
+    // The factory falls back to `dial` when DIAL_CLI_PATH is unset, and
+    // path.dirname('dial') is '.'. Prepending that would let a stray ./dial in
+    // the repo win command lookup over the installed CLI.
+    spawns.length = 0;
+    const adapter = createDialAdapter({ apiKey: 'sk_live_test', fromNumber: '+14155550123', cliPath: 'dial' });
+    await adapter.deliver('+14155550123', '+15557654321', { content: 'hi' } as unknown as OutboundMessage);
+    const send = spawns.filter((s) => s.args[0] === 'message')[0];
+    const dirs = ((send.opts.env as Record<string, string>).PATH ?? '').split(':');
+    expect(dirs).not.toContain('.');
+    expect(dirs).not.toContain('');
+    // …while node stays resolvable, so the CLI's shebang still works.
+    expect(dirs).toContain(path.dirname(process.execPath));
+  });
+
   it('rejects when the CLI exits non-zero so the send lands on the retry path', async () => {
     cliResult = new Error('Command failed: dial message');
     const adapter = createDialAdapter({ apiKey: 'sk_live_test', fromNumber: '+14155550123', cliPath: '/usr/bin/dial' });

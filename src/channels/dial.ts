@@ -83,9 +83,12 @@ const execFileAsync = promisify(execFile);
  */
 function cliEnvFor(cliPath: string): NodeJS.ProcessEnv {
   const current = (process.env.PATH ?? '').split(path.delimiter).filter(Boolean);
-  const extra = [...new Set([path.dirname(cliPath), path.dirname(process.execPath)])].filter(
-    (d) => d && !current.includes(d),
-  );
+  // Only an absolute cliPath contributes a directory. The factory falls back to
+  // the bare name `dial`, and path.dirname('dial') is '.', which would put the
+  // service's working directory on PATH ahead of every real bin dir — letting a
+  // stray ./dial in the repo win command lookup over the installed CLI.
+  const cliDir = path.isAbsolute(cliPath) ? path.dirname(cliPath) : '';
+  const extra = [...new Set([cliDir, path.dirname(process.execPath)])].filter((d) => d && !current.includes(d));
   const merged = [...extra, ...current];
   return { ...process.env, PATH: merged.join(path.delimiter), DIAL_USER_AGENT: nanoclawUserAgent() };
 }

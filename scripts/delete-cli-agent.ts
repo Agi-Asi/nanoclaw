@@ -18,6 +18,8 @@ import { closeDb, initDb } from '../src/db/connection.js';
 import { runMigrations } from '../src/db/migrations/index.js';
 import type { AgentGroup } from '../src/types.js';
 
+import { stopAgentGroupSessions } from './delete-cli-agent-runtime.js';
+
 interface Args {
   folder: string;
 }
@@ -43,6 +45,7 @@ try {
   await runMigrations(db);
   ag = await getAgentGroupByFolder(args.folder);
   if (ag) {
+    await stopAgentGroupSessions(ag.id);
     if (!db.columnOwners) throw new Error(`Central DB driver "${db.dialect}" does not support column discovery`);
     const group = ag;
     await db.transaction(async () => {

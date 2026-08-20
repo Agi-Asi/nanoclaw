@@ -132,12 +132,21 @@ async function main(): Promise<void> {
     rootDir: root,
     allowGuests: args.allowGuests,
     room: args.room,
+    // A workspace install approval can hold this for minutes; say so rather
+    // than letting the script look hung.
+    onInstallPending: (text) => {
+      console.log('');
+      console.log(text);
+      console.log('Waiting…');
+    },
   });
 
   console.log('');
   console.log('Slack leg complete:');
   console.log(`  agent     ${newGroup.name} [${args.group}]`);
-  console.log(`  instance  slack-${result.slug} (SLACK_INSTANCES + SLACK_*_TOKEN_${result.slug.toUpperCase().replace(/-/g, '_')})`);
+  console.log(
+    `  instance  slack-${result.slug} (SLACK_INSTANCES + SLACK_*_TOKEN_${result.slug.toUpperCase().replace(/-/g, '_')})`,
+  );
   console.log(`  bot       ${result.newBotUserId}`);
   console.log(`  DM        ${result.dmChannelId} (operator ${result.operatorUserId})`);
   console.log(

@@ -159,6 +159,12 @@ let fetchCalls: RecordedFetch[] = [];
 let postMessageEnvSnapshots: string[] = [];
 let brokerStatus = 200;
 let tmpDir = '';
+/** null → the workspace refused auto-install; POST /v1/apps answers with a link instead. */
+let brokerBotToken: string | null = NEW_BOT_TOKEN;
+let brokerInstallUrl = '';
+/** Successive GET /v1/apps/{id} answers; the last one repeats. `http` overrides the status code. */
+let appStateQueue: Array<{ status?: string; bot_token?: string; http?: number }> = [];
+let appStateReads = 0;
 
 function jsonResponse(obj: unknown, status = 200): Response {
   return new Response(JSON.stringify(obj), { status, headers: { 'content-type': 'application/json' } });
@@ -182,9 +188,22 @@ function fakeFetch(
     // ...and ready on the first poll, so the bot is born wearing its face.
     return Promise.resolve(jsonResponse({ avatar_id: 'av-test', status: 'ready' }));
   }
+  if (url.includes('/v1/apps/')) {
+    const state = appStateQueue[Math.min(appStateReads, appStateQueue.length - 1)];
+    appStateReads++;
+    if (!state) return Promise.resolve(jsonResponse({ error: 'not_found' }, 404));
+    return Promise.resolve(jsonResponse(state, state.http ?? 200));
+  }
   if (url.endsWith('/v1/apps')) {
     if (brokerStatus !== 200) return Promise.resolve(jsonResponse({ message: 'boom' }, brokerStatus));
-    return Promise.resolve(jsonResponse({ appId: 'A0TEST', appToken: NEW_APP_TOKEN, botToken: NEW_BOT_TOKEN }));
+    return Promise.resolve(
+      jsonResponse({
+        appId: 'A0TEST',
+        appToken: NEW_APP_TOKEN,
+        ...(brokerBotToken ? { botToken: brokerBotToken } : {}),
+        ...(brokerInstallUrl ? { installUrl: brokerInstallUrl } : {}),
+      }),
+    );
   }
   if (url.includes('/api/auth.test')) {
     const userId = token === ORIGIN_BOT_TOKEN ? 'U0ORIGINBOT' : 'U0NEWBOT';
@@ -242,6 +261,10 @@ beforeEach(() => {
   fetchCalls = [];
   postMessageEnvSnapshots = [];
   brokerStatus = 200;
+  brokerBotToken = NEW_BOT_TOKEN;
+  brokerInstallUrl = '';
+  appStateQueue = [];
+  appStateReads = 0;
   vi.stubGlobal('fetch', fakeFetch);
   logSpies = [
     vi.spyOn(log, 'debug').mockImplementation(() => {}),
@@ -282,6 +305,8 @@ beforeEach(() => {
 afterEach(() => {
   process.chdir(originalCwd);
   delete process.env.NANOCLAW_REGISTRY_TOKEN;
+  delete process.env.SLACK_INSTALL_WAIT_MS;
+  delete process.env.SLACK_INSTALL_POLL_MS;
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   closeDb();
@@ -699,5 +724,180 @@ describe('slack-aware create_agent — failure and retry', () => {
     // S6-S8 must not have run: no DM messaging group got wired for an
     // instance the runtime still can't start.
     expect(getAllMessagingGroups().length).toBe(mgCountBefore);
+  });
+});
+
+describe('slack-aware create_agent — workspace install approval', () => {
+  const INSTALL_URL = 'https://slack.com/oauth/v2/authorize?client_id=1.2&state=signed-state';
+
+  /** Auto-install refused: the app is real, but the workspace must approve it. */
+  function refuseAutoInstall(): void {
+    brokerBotToken = null;
+    brokerInstallUrl = INSTALL_URL;
+    process.env.SLACK_INSTALL_POLL_MS = '1';
+    process.env.SLACK_INSTALL_WAIT_MS = '120';
+  }
+
+  function env(): string {
+    return fs.readFileSync(path.join(tmpDir, '.env'), 'utf-8');
+  }
+
+  function postedTexts(): string[] {
+    return fetchCalls
+      .filter((c) => c.url.includes('chat.postMessage'))
+      .map((c) => (JSON.parse(c.body) as { text: string }).text);
+  }
+
+  it('tells the operator what to approve, then finishes the flow on the token the approval releases', async () => {
+    refuseAutoInstall();
+    appStateQueue = [{ status: 'pending_install' }, { status: 'installed', bot_token: NEW_BOT_TOKEN }];
+
+    await runCreateAgent({ name: 'Research', instructions: 'dig deep' });
+
+    // The heads-up goes out as the ORIGIN bot, in the conversation the create
+    // was asked for — the origin agent's own reply could not be delivered
+    // while this handler still holds the session.
+    const notice = postedTexts()[0];
+    expect(notice).toContain('needs an admin to approve');
+    expect(notice).toContain(INSTALL_URL);
+    const noticeCall = fetchCalls.find((c) => c.url.includes('chat.postMessage'))!;
+    expect(noticeCall.token).toBe(ORIGIN_BOT_TOKEN);
+    expect((JSON.parse(noticeCall.body) as { channel: string }).channel).toBe('D0OPDM');
+
+    // From the token onward the flow is the ordinary one: adapter hot-add,
+    // DM row + wiring, room, welcome DM.
+    expect(env()).toMatch(/^SLACK_BOT_TOKEN_RESEARCH=/m);
+    expect(env()).toMatch(/^SLACK_INSTANCES=.*research/m);
+    expect(fakeDeps.startChannelAdapter).toHaveBeenCalledWith('slack-research');
+    const newGroup = getAgentGroupByFolder('research')!;
+    const dmMg = getMessagingGroupByPlatform('slack', 'slack:D0NEWDM', 'slack-research');
+    expect(getMessagingGroupAgentByPair(dmMg!.id, newGroup.id)).toBeDefined();
+    expect(postedTexts().some((t) => t.includes("I'm Research, your new agent"))).toBe(true);
+
+    // Exactly one app, and the consumed install link is retired.
+    expect(fetchCalls.filter((c) => c.url.endsWith('/v1/apps'))).toHaveLength(1);
+    expect(env()).toMatch(/^SLACK_INSTALL_URL_RESEARCH=$/m);
+
+    const success = notifyTexts().at(-1)!;
+    expect(success).toContain('is live on Slack');
+    expect(success).toContain('approved the install');
+    assertNoTokenLeak();
+  });
+
+  it('parks the app when the approval never lands, keeping every part of it for a resume', async () => {
+    refuseAutoInstall();
+    appStateQueue = [{ status: 'pending_install' }];
+
+    await runCreateAgent({ name: 'Research' });
+
+    // Nothing to re-create: app token, app id and the link are all on record.
+    expect(env()).toMatch(/^SLACK_APP_TOKEN_RESEARCH=/m);
+    expect(env()).toMatch(/^SLACK_APP_ID_RESEARCH=A0TEST$/m);
+    expect(env()).toContain(`SLACK_INSTALL_URL_RESEARCH=${INSTALL_URL}`);
+    expect(env()).not.toMatch(/^SLACK_BOT_TOKEN_RESEARCH=./m);
+    // The wait really ran rather than falling straight through.
+    expect(appStateReads).toBeGreaterThan(1);
+
+    const failure = notifyTexts().at(-1)!;
+    expect(failure).toContain("failed at step 'install-wait'");
+    expect(failure).toContain('still waiting on a workspace install approval');
+    expect(failure).toContain('nothing needs re-creating');
+    expect(failure).toContain('finish setting up Research');
+    assertNoTokenLeak();
+  });
+
+  it('asking again after a park resumes the parked app instead of provisioning a second one', async () => {
+    refuseAutoInstall();
+    appStateQueue = [{ status: 'pending_install' }];
+    await runCreateAgent({ name: 'Research' });
+    const groupCountAfterPark = getAgentGroupByFolder('research')!.id;
+    const postsAfterPark = postedTexts().length;
+
+    // The operator approves the install, then asks for the same agent again.
+    appStateQueue = [{ status: 'installed', bot_token: NEW_BOT_TOKEN }];
+    appStateReads = 0;
+    await runCreateAgent({ name: 'Research' });
+
+    // One Slack app, one agent group — the second ask finished the first.
+    expect(fetchCalls.filter((c) => c.url.endsWith('/v1/apps'))).toHaveLength(1);
+    expect(getAgentGroupByFolder('research')!.id).toBe(groupCountAfterPark);
+    expect(getAgentGroupByFolder('research-2')).toBeUndefined();
+    // Upstream's name-collision answer must not be what the user hears.
+    expect(notifyTexts().at(-1)).not.toContain('already have a destination');
+    expect(notifyTexts().at(-1)).toContain('is live on Slack');
+
+    // A resume checks before it sleeps, so the standing approval is picked up
+    // on the first read.
+    expect(appStateReads).toBe(1);
+    expect(postedTexts()[postsAfterPark]).toContain('Still waiting on your workspace');
+    expect(env()).toMatch(/^SLACK_BOT_TOKEN_RESEARCH=/m);
+    expect(getMessagingGroupByPlatform('slack', 'slack:D0NEWDM', 'slack-research')).toBeDefined();
+  });
+
+  it('SLACK_INSTALL_WAIT_MS=0 parks immediately — a slow approval queue need not hold delivery open', async () => {
+    refuseAutoInstall();
+    process.env.SLACK_INSTALL_WAIT_MS = '0';
+    appStateQueue = [{ status: 'pending_install' }];
+
+    await runCreateAgent({ name: 'Research' });
+
+    expect(appStateReads).toBe(0);
+    // The operator still gets the link — the flow declines to wait, not to ask.
+    expect(postedTexts()[0]).toContain(INSTALL_URL);
+    expect(notifyTexts().at(-1)).toContain("failed at step 'install-wait'");
+    expect(env()).toMatch(/^SLACK_APP_ID_RESEARCH=A0TEST$/m);
+  });
+
+  it('a refusal with no install link keeps the hand-finish instructions — there is nothing to wait for', async () => {
+    brokerBotToken = null;
+    brokerInstallUrl = '';
+    process.env.SLACK_INSTALL_POLL_MS = '1';
+    process.env.SLACK_INSTALL_WAIT_MS = '120';
+
+    await runCreateAgent({ name: 'Research' });
+
+    expect(appStateReads).toBe(0);
+    expect(postedTexts()).toHaveLength(0);
+    const failure = notifyTexts().at(-1)!;
+    expect(failure).toContain("failed at step 'broker'");
+    expect(failure).toContain('SLACK_BOT_TOKEN_RESEARCH');
+  });
+
+  it('polls through a service hiccup instead of treating it as a refusal', async () => {
+    refuseAutoInstall();
+    appStateQueue = [
+      { http: 502, status: 'bad_gateway' },
+      { status: 'installed', bot_token: NEW_BOT_TOKEN },
+    ];
+
+    await runCreateAgent({ name: 'Research' });
+
+    expect(appStateReads).toBe(2);
+    expect(notifyTexts().at(-1)).toContain('is live on Slack');
+  });
+
+  it('stops on a credential the service refuses — no later poll can change that answer', async () => {
+    refuseAutoInstall();
+    process.env.SLACK_INSTALL_WAIT_MS = '5000'; // never reached
+    appStateQueue = [{ http: 401, status: 'unauthorized' }];
+
+    await runCreateAgent({ name: 'Research' });
+
+    expect(appStateReads).toBe(1);
+    const failure = notifyTexts().at(-1)!;
+    expect(failure).toContain("failed at step 'install-wait'");
+    expect(failure).toContain('refused this install');
+    assertNoTokenLeak();
+  });
+
+  it('a token released to someone else stops the wait rather than burning the whole budget', async () => {
+    refuseAutoInstall();
+    process.env.SLACK_INSTALL_WAIT_MS = '5000'; // never reached
+    appStateQueue = [{ status: 'installed' }];
+
+    await runCreateAgent({ name: 'Research' });
+
+    expect(appStateReads).toBe(1);
+    expect(notifyTexts().at(-1)).toContain("failed at step 'install-wait'");
   });
 });

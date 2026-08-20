@@ -189,6 +189,20 @@ bash setup/lib/restart.sh
   one in the room. The new bot typically answers within ~10 seconds; if it
   stays silent for a minute, an operator can run `bash setup/lib/restart.sh`
   as the fallback.
+- **Workspaces that gate installs.** Where an admin must approve every app
+  install, the workspace refuses the automatic one and the managed service
+  answers with an install link instead of a bot token. The flow does not fall
+  back to hand-building an app: it posts one line into the conversation the
+  create came from — as the ORIGINATING bot, since the origin agent's own
+  reply cannot be delivered while the handler is still running — naming the
+  link to approve, then polls the service (5s, up to 5 minutes) for the bot
+  token the completed install releases. On arrival the rest of the flow runs
+  exactly as if the install had been automatic. On timeout the app parks:
+  `SLACK_APP_TOKEN_<NAME>`, `SLACK_APP_ID_<NAME>` and
+  `SLACK_INSTALL_URL_<NAME>` stay in `.env`, and asking the same agent for the
+  same name again resumes THAT app — it never provisions a second one.
+  `SLACK_INSTALL_WAIT_MS=0` skips the inline wait for installs that always go
+  through a slow approval queue; `SLACK_INSTALL_POLL_MS` moves the cadence.
 - **Teams get one room.** `create_agent({ ..., room: 'none' })` skips the
   shared room; the multi-agent pattern is N such creates followed by ONE
   `create_room` naming all of them. When a batch of creates arrives together,

@@ -43,6 +43,7 @@ import {
   getMessagingGroupAgents,
   getMessagingGroupByPlatform,
 } from '../../db/messaging-groups.js';
+import { log } from '../../log.js';
 import type { MessagingGroup, MessagingGroupAgent, Session } from '../../types.js';
 import {
   createDestination,
@@ -385,12 +386,52 @@ export async function ensureAgentRoom(args: {
   return { roomChannelId, created };
 }
 
+/**
+ * How long the flow waits inline for a workspace install approval, and how
+ * often it checks. The default is five minutes at a five-second cadence —
+ * long enough for someone already at their desk, short enough that the app
+ * parks (and stays resumable) rather than holding this session's delivery
+ * open indefinitely.
+ *
+ * `SLACK_INSTALL_WAIT_MS=0` skips the wait entirely: installs that always go
+ * through a slow approval queue are better served by parking immediately and
+ * finishing on a later ask. `SLACK_INSTALL_POLL_MS` moves the cadence.
+ */
+function resolveInstallWait(rootDir: string): { intervalMs?: number; timeoutMs?: number } | undefined {
+  const num = (key: string): number | undefined => {
+    const raw = readEnvValue(rootDir, key);
+    if (raw === undefined) return undefined;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+  };
+  const timeoutMs = num('SLACK_INSTALL_WAIT_MS');
+  const intervalMs = num('SLACK_INSTALL_POLL_MS');
+  if (timeoutMs === undefined && intervalMs === undefined) return undefined;
+  return { ...(timeoutMs !== undefined ? { timeoutMs } : {}), ...(intervalMs !== undefined ? { intervalMs } : {}) };
+}
+
+/**
+ * The one line the human gets while the flow waits on a workspace install
+ * approval. Short on purpose: the link is the only actionable part, and the
+ * flow says nothing else until it either finishes or parks.
+ */
+export function installPendingText(displayName: string, info: { installUrl?: string; resumed: boolean }): string {
+  const where = info.installUrl ? ` Approve it here: ${info.installUrl}` : '';
+  return info.resumed
+    ? `Still waiting on your workspace to approve installing ${displayName}.${where} — I'll finish setting it up as soon as that lands.`
+    : `${displayName} is created, but your workspace needs an admin to approve installing it.${where} — I'll finish the setup automatically once it's approved.`;
+}
+
 interface FlowArgs {
   slug: string;
   displayName: string;
   sourceGroupId: string;
   newAgentGroupId: string;
   originInstanceKey: string;
+  /** Slack channel the create was asked for in — where the flow talks back
+   *  while it waits. Absent on the out-of-process finish path, which prints
+   *  to the operator's terminal instead. */
+  originChannelId?: string;
   rootDir: string;
   /** false on the out-of-process finish path — S5 needs the live host's registry. */
   hotStart: boolean;
@@ -411,6 +452,11 @@ interface FlowArgs {
    * N creates with room:'none' followed by one create_room with all of them.
    */
   room?: 'own' | 'none';
+  /** Wait budget for a deferred workspace install. Tests shorten it. */
+  installWait?: { intervalMs?: number; timeoutMs?: number };
+  /** Extra sink for the pending-install line — the finish script prints it to
+   *  the operator's terminal, which has no Slack conversation to post into. */
+  onInstallPending?: (text: string) => void;
 }
 
 async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
@@ -438,6 +484,13 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
   const originAuth = await slackAuthTest(originBotToken, 'origin-auth');
   const originBotUserId = originAuth.userId;
 
+  // S3/S4 provision. A workspace that requires an admin to approve installs
+  // refuses auto-install, and provisionSlackApp then waits for the human to
+  // finish it in the browser. That wait is silent from the outside, so it
+  // announces itself HERE, as the origin bot, in the conversation the create
+  // was asked for — the origin agent cannot relay it, since its own replies
+  // cannot be delivered while this handler is still running. A failed
+  // announcement is not worth abandoning the wait for.
   const app = await provisionSlackApp({
     slug,
     displayName,
@@ -446,6 +499,21 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
     description: args.description,
     allowGuests: args.allowGuests,
     requestedBy: operatorUserId,
+    installWait: args.installWait ?? resolveInstallWait(rootDir),
+    onInstallPending: async (info) => {
+      const text = installPendingText(displayName, info);
+      log.info('Waiting on a Slack workspace install approval', { step: 'install-wait', appId: info.appId });
+      args.onInstallPending?.(text);
+      if (!args.originChannelId) return;
+      try {
+        await slackPostMessage(originBotToken, args.originChannelId, text, 'install-wait');
+      } catch (err) {
+        log.warn('Could not announce the pending Slack install', {
+          step: 'install-wait',
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
   });
 
   // S5 adapter-start. The multi-instance module must be installed regardless
@@ -573,7 +641,14 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
     );
   }
 
-  return { slug, newBotUserId, operatorUserId, dmChannelId, roomChannelId };
+  return {
+    slug,
+    newBotUserId,
+    operatorUserId,
+    dmChannelId,
+    roomChannelId,
+    ...(app.deferredInstall ? { deferredInstall: true } : {}),
+  };
 }
 
 /** In-host entry — the wrapped create_agent handler's Slack leg (hot-add active). */
@@ -582,6 +657,8 @@ export async function runSlackAgentFlow(args: {
   session: Session;
   newAgentGroupId: string;
   slug: string;
+  /** Wait budget for a deferred workspace install. Tests shorten it. */
+  installWait?: { intervalMs?: number; timeoutMs?: number };
 }): Promise<OrchestrateSuccess> {
   const { content, session, newAgentGroupId, slug } = args;
   const displayName =
@@ -593,6 +670,9 @@ export async function runSlackAgentFlow(args: {
     sourceGroupId: session.agent_group_id,
     newAgentGroupId,
     originInstanceKey: originMg?.instance ?? 'slack',
+    // messaging_groups store 'slack:<channelId>'; the Web API wants the bare id.
+    originChannelId: originMg?.platform_id?.replace(/^slack:/, ''),
+    installWait: args.installWait,
     rootDir: process.cwd(),
     hotStart: true,
     description: typeof content.instructions === 'string' ? content.instructions.slice(0, 300) : undefined,
@@ -620,6 +700,10 @@ export async function finishSlackAgentFlow(args: {
   /** Pass 'none' when the original create used room:'none' — keeps the
    *  finish path from growing a room the caller deliberately skipped. */
   room?: 'own' | 'none';
+  /** Called with the pending-install line when the app is waiting on a
+   *  workspace install approval — the script prints it so a five-minute wait
+   *  does not read as a hang. */
+  onInstallPending?: (text: string) => void;
 }): Promise<OrchestrateSuccess> {
   return runFlow({
     slug: args.slug,
@@ -631,5 +715,6 @@ export async function finishSlackAgentFlow(args: {
     hotStart: false,
     allowGuests: args.allowGuests,
     room: args.room,
+    onInstallPending: args.onInstallPending,
   });
 }

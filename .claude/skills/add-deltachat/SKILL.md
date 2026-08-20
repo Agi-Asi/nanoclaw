@@ -7,50 +7,35 @@ description: Add DeltaChat channel integration via @deltachat/stdio-rpc-server. 
 
 The adapter drives the `@deltachat/stdio-rpc-server` JSON-RPC subprocess directly — pure Node.js against the DeltaChat core library. Messages are delivered over email with Autocrypt/OpenPGP encryption.
 
-## Install
+## Apply
 
-### Pre-flight (idempotent)
+The mechanical steps use the deterministic skill engine and are safe to re-run.
 
-Skip to **Credentials** if all of these are already in place:
+### 1. Copy the adapter and its registration test
 
-- `src/channels/deltachat.ts` exists
-- `src/channels/deltachat-registration.test.ts` exists
-- `src/channels/index.ts` contains `import './deltachat.js';`
-- `@deltachat/stdio-rpc-server` is listed in `package.json` dependencies
-
-Otherwise continue. Every step below is safe to re-run.
-
-### 1. Fetch the channels branch
-
-```bash
-git fetch origin channels
-```
-
-### 2. Copy the adapter and its registration test
-
-```bash
-git show origin/channels:src/channels/deltachat.ts                 > src/channels/deltachat.ts
-git show origin/channels:src/channels/deltachat-registration.test.ts > src/channels/deltachat-registration.test.ts
+```nc:copy from-branch:channels
+src/channels/deltachat.ts
+src/channels/deltachat-registration.test.ts
 ```
 
 ### 3. Append the self-registration import
 
-Append to `src/channels/index.ts` (skip if already present):
-
-```typescript
+```nc:append to:src/channels/index.ts
 import './deltachat.js';
 ```
 
 ### 4. Install the adapter package (pinned)
 
-```bash
-pnpm install @deltachat/stdio-rpc-server@2.49.0
+```nc:dep
+@deltachat/stdio-rpc-server@2.49.0
 ```
 
 ### 5. Build and validate
 
-```bash
+```nc:run effect:build
 pnpm run build
+```
+```nc:run effect:test
 pnpm exec vitest run src/channels/deltachat-registration.test.ts
 ```
 

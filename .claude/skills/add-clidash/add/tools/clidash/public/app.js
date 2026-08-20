@@ -665,7 +665,13 @@ function renderTable(cliName, resource) {
   const error = state.errors.get(key);
   const canDrill = (cli.commands || []).includes('get');
   const parts = [el('h2', { class: 'page-title' }, resource)];
-  if (cli.help) { ensureHelp(cliName, resource); parts.push(helpPanel(state.helpCache.get(key))); }
+  if (cli.help) {
+    ensureHelp(cliName, resource);
+    // helpPanel returns null when help is known to be unavailable, and
+    // replaceChildren would stringify that null into the page.
+    const panel = helpPanel(state.helpCache.get(key));
+    if (panel) parts.push(panel);
+  }
   if (error && snapshot) parts.push(el('div', { class: 'stale-note' }, `⚠ live fetch failing — snapshot from ${new Date(snapshot.fetchedAt).toLocaleTimeString()}`));
   if (!snapshot) {
     parts.push(error ? el('div', { class: 'tab-error' }, [`Failed to load ${resource}.`, el('pre', {}, error)]) : el('div', { class: 'empty' }, 'Loading…'));

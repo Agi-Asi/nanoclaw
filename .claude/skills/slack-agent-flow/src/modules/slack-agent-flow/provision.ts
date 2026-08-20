@@ -405,6 +405,93 @@ async function provisionViaBroker(
   };
 }
 
+// ── Deferred install completion (broker transport) ──
+//
+// A workspace with an admin-approval policy refuses auto-install: POST
+// /v1/apps answers with an install_url and no bot token. That URL carries its
+// own signed state and stays valid for days, so the app is not lost — it sits
+// at pending_install until a human completes the install in the browser, and
+// GET /v1/apps/{app_id} then releases the bot token exactly once. Mirrors
+// waitForInstall in src/provisioning/slack-app.ts.
+
+/** Poll cadence while a workspace install approval is outstanding. */
+export const INSTALL_POLL_INTERVAL_MS = 5_000;
+/** How long the flow waits inline before parking the app for a later resume. */
+export const INSTALL_POLL_TIMEOUT_MS = 5 * 60_000;
+
+type AppStatus = 'installed' | 'pending_install' | 'deleted';
+
+interface AppState {
+  status: AppStatus;
+  botToken?: string;
+}
+
+/**
+ * One app's state, or undefined when the service does not know it (404) —
+ * which for every caller here means the same as "stop waiting". Transport
+ * failures throw so the poll loop can decide whether they are worth retrying.
+ */
+async function fetchAppState(baseUrl: string, installToken: string, appId: string): Promise<AppState | undefined> {
+  const res = await fetch(`${baseUrl}/v1/apps/${encodeURIComponent(appId)}`, {
+    headers: { Authorization: `Bearer ${installToken}` },
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (res.status === 404) return undefined;
+  if (res.status === 401 || res.status === 403) {
+    throw new SlackFlowError(
+      'install-wait',
+      `the Slack service refused this install's credentials (HTTP ${res.status})`,
+    );
+  }
+  if (!res.ok) throw new Error(`GET /v1/apps/${appId}: HTTP ${res.status}`);
+  const data = (await res.json()) as { status?: string; bot_token?: string | null; botToken?: string | null };
+  const status = data.status;
+  if (status !== 'installed' && status !== 'pending_install' && status !== 'deleted') {
+    throw new Error(`GET /v1/apps/${appId}: unrecognized status '${String(status)}'`);
+  }
+  // Contract shape is snake_case; accept camelCase the way the create call does.
+  const botToken = data.bot_token ?? data.botToken ?? undefined;
+  return { status, ...(botToken ? { botToken } : {}) };
+}
+
+/**
+ * Wait out a pending install and return the one-time bot token.
+ *
+ * Undefined means "stop waiting and park the app": the deadline passed, the
+ * service does not know the app, it was deleted, or it reads as installed with
+ * no token left to give (someone else already took it — no further poll
+ * recovers it). A credential refusal is the one failure worth surfacing, since
+ * the next poll cannot change that answer.
+ */
+export async function waitForInstall(
+  baseUrl: string,
+  installToken: string,
+  appId: string,
+  opts: { intervalMs?: number; timeoutMs?: number; checkImmediately?: boolean } = {},
+): Promise<string | undefined> {
+  const intervalMs = opts.intervalMs ?? INSTALL_POLL_INTERVAL_MS;
+  const deadline = Date.now() + (opts.timeoutMs ?? INSTALL_POLL_TIMEOUT_MS);
+  // A resume checks straight away — the approval may have landed while nobody
+  // was waiting, and that is worth one call even when the budget is zero. A
+  // fresh refusal sleeps first: nothing can have changed in the instant since
+  // the service said no.
+  let due = opts.checkImmediately === true;
+  while (due || Date.now() < deadline) {
+    if (!due) await new Promise((r) => setTimeout(r, intervalMs));
+    due = false;
+    let state: AppState | undefined;
+    try {
+      state = await fetchAppState(baseUrl, installToken, appId);
+    } catch (err) {
+      if (err instanceof SlackFlowError) throw err;
+      continue; // transient — the deadline already bounds this
+    }
+    if (!state || state.status === 'deleted') return undefined;
+    if (state.status === 'installed') return state.botToken;
+  }
+  return undefined;
+}
+
 interface SlackApiResponse {
   ok: boolean;
   error?: string;
@@ -476,33 +563,103 @@ async function provisionDirect(
   return result;
 }
 
+/** slug.toUpperCase().replace(/-/g, '_') — the .env key suffix shape. */
+export function envKeySuffix(slug: string): string {
+  return slug.toUpperCase().replace(/-/g, '_');
+}
+
 /**
- * Provision (or reuse) the named instance's Slack app and persist its tokens.
+ * The .env keys one provisioned instance owns. The app id and install URL are
+ * the resume state for an app whose workspace has not approved the install
+ * yet: without them a retry has nothing to poll and can only create a second
+ * Slack app for the same agent.
+ */
+export function envKeysForSlug(slug: string): {
+  botKey: string;
+  appKey: string;
+  appIdKey: string;
+  installUrlKey: string;
+} {
+  const suffix = envKeySuffix(slug);
+  return {
+    botKey: `SLACK_BOT_TOKEN_${suffix}`,
+    appKey: `SLACK_APP_TOKEN_${suffix}`,
+    appIdKey: `SLACK_APP_ID_${suffix}`,
+    installUrlKey: `SLACK_INSTALL_URL_${suffix}`,
+  };
+}
+
+/**
+ * The app this slug has parked awaiting a workspace install approval, if any:
+ * an app token and an app id on record, no bot token yet. Callers use it to
+ * tell "finish what you started" apart from "start something new".
+ */
+export function pendingInstall(rootDir: string, slug: string): { appId: string; installUrl?: string } | undefined {
+  const { botKey, appKey, appIdKey, installUrlKey } = envKeysForSlug(slug);
+  if (readEnvValue(rootDir, botKey)) return undefined;
+  if (!readEnvValue(rootDir, appKey)) return undefined;
+  const appId = readEnvValue(rootDir, appIdKey);
+  if (!appId) return undefined;
+  return { appId, installUrl: readEnvValue(rootDir, installUrlKey) };
+}
+
+/** Best-effort: a caller's notification must never take the flow down with it. */
+async function announcePending(
+  input: ProvisionInput,
+  info: { appId: string; installUrl?: string; resumed: boolean },
+): Promise<void> {
+  try {
+    await input.onInstallPending?.(info);
+  } catch {
+    // The wait is the point; the announcement is a courtesy.
+  }
+}
+
+/** What the human is told when the wait runs out and the app stays parked. */
+function parkedError(displayName: string, appId: string, installUrl: string | undefined): SlackFlowError {
+  return new SlackFlowError(
+    'install-wait',
+    `Slack app ${appId} for "${displayName}" is still waiting on a workspace install approval. ` +
+      `Nothing was lost and nothing needs re-creating — the app is saved. ` +
+      `${installUrl ? `Approve the install at ${installUrl}, then ask` : 'Once the install is approved, ask'} ` +
+      `to finish setting up ${displayName} and it picks up from here.`,
+  );
+}
+
+/**
+ * Provision (or reuse, or finish) the named instance's Slack app and persist
+ * its tokens.
  *
- * Reuse: both per-instance tokens already in .env → no network, reused:true.
- * Fresh: resolve a credential (broker else direct), provision, then persist
- * SLACK_APP_TOKEN_<S> / SLACK_BOT_TOKEN_<S> and union the slug into
- * SLACK_INSTANCES IMMEDIATELY — .env is the resume state; a failure after
- * this point never re-provisions a duplicate Slack app on retry.
+ * Three entries, decided by what .env already holds:
+ *  - both tokens → reuse, no network.
+ *  - app token + app id, no bot token → an app parked awaiting a workspace
+ *    install approval: poll for it rather than provision a second one.
+ *  - nothing → provision. A refused auto-install is not the end of the road:
+ *    the app is real and its install URL stays valid, so the flow announces
+ *    the approval and waits inline for the install to land.
+ *
+ * .env is the resume state, so everything derivable is written the moment it
+ * exists (mirrors slack-create-agent.ts) — a failure after that point never
+ * re-provisions a duplicate Slack app on retry.
  */
 export async function provisionSlackApp(input: ProvisionInput): Promise<ProvisionResult> {
   const { slug, displayName, rootDir } = input;
-  const envSuffix = slug.toUpperCase().replace(/-/g, '_');
-  const botKey = `SLACK_BOT_TOKEN_${envSuffix}`;
-  const appKey = `SLACK_APP_TOKEN_${envSuffix}`;
+  const envSuffix = envKeySuffix(slug);
+  const { botKey, appKey, appIdKey, installUrlKey } = envKeysForSlug(slug);
 
   const existingBot = readEnvValue(rootDir, botKey);
   const existingApp = readEnvValue(rootDir, appKey);
   if (existingBot && existingApp) {
-    // appId is unknown on the reuse path — .env stores tokens only.
-    return { slug, envSuffix, botToken: existingBot, appToken: existingApp, appId: '', reused: true };
-  }
-  if (existingApp && !existingBot) {
-    throw new SlackFlowError(
-      'no-credentials',
-      `${appKey} is set but ${botKey} is missing — the app exists but was never installed. ` +
-        `Finish the install from the app's page in Slack, put the xoxb-… token in .env as ${botKey}, and retry.`,
-    );
+    return {
+      slug,
+      envSuffix,
+      botToken: existingBot,
+      appToken: existingApp,
+      // Recorded since the deferred-install work; older installs have no row,
+      // and nothing downstream of provisioning needs the id.
+      appId: readEnvValue(rootDir, appIdKey) ?? '',
+      reused: true,
+    };
   }
   if (existingBot && !existingApp) {
     throw new SlackFlowError(
@@ -512,6 +669,36 @@ export async function provisionSlackApp(input: ProvisionInput): Promise<Provisio
   }
 
   const credential = resolveProvisioningCredential(rootDir);
+
+  if (existingApp && !existingBot) {
+    const parked = pendingInstall(rootDir, slug);
+    // No app id on record (or no broker to ask) leaves the hand-finish
+    // instructions as the only honest answer.
+    if (!parked || credential?.mode !== 'broker') {
+      throw new SlackFlowError(
+        'no-credentials',
+        `${appKey} is set but ${botKey} is missing — the app exists but was never installed. ` +
+          `Finish the install from the app's page in Slack, put the xoxb-… token in .env as ${botKey}, and retry.`,
+      );
+    }
+    await announcePending(input, { appId: parked.appId, installUrl: parked.installUrl, resumed: true });
+    const botToken = await waitForInstall(credential.baseUrl, credential.installToken, parked.appId, {
+      ...input.installWait,
+      checkImmediately: true,
+    });
+    if (!botToken) throw parkedError(displayName, parked.appId, parked.installUrl);
+    persistInstalled(rootDir, slug, botToken);
+    return {
+      slug,
+      envSuffix,
+      botToken,
+      appToken: existingApp,
+      appId: parked.appId,
+      reused: false,
+      deferredInstall: true,
+    };
+  }
+
   if (!credential) {
     throw new SlackFlowError(
       'no-credentials',
@@ -539,12 +726,14 @@ export async function provisionSlackApp(input: ProvisionInput): Promise<Provisio
         )
       : await provisionDirect(credential.managerToken, displayName, allowGuests);
 
-  // Persist what we have before anything else can fail — .env is the resume
-  // state (mirrors slack-create-agent.ts). App token + instance slug land
-  // even when auto-install was refused so a manual install can finish it.
+  // Persist what we have before anything else can fail. App token, app id and
+  // instance slug land even when auto-install was refused, so a later run can
+  // finish this app instead of creating another.
   try {
     upsertEnvKey(rootDir, appKey, app.appToken);
+    if (app.appId) upsertEnvKey(rootDir, appIdKey, app.appId);
     if (app.botToken) upsertEnvKey(rootDir, botKey, app.botToken);
+    else if (app.installUrl) upsertEnvKey(rootDir, installUrlKey, app.installUrl);
     appendToEnvList(rootDir, 'SLACK_INSTANCES', slug);
   } catch (err) {
     throw new SlackFlowError(
@@ -554,7 +743,30 @@ export async function provisionSlackApp(input: ProvisionInput): Promise<Provisio
   }
 
   if (!app.botToken) {
-    // Usually a workspace admin-approval policy refusing auto-install.
+    // Usually a workspace admin-approval policy refusing auto-install. On the
+    // broker transport that is a wait, not a dead end — the install URL is
+    // signed and long-lived, and the service releases the bot token once the
+    // install lands. The direct transport has no such read-back.
+    if (credential.mode === 'broker' && app.installUrl) {
+      await announcePending(input, { appId: app.appId, installUrl: app.installUrl, resumed: false });
+      const botToken = await waitForInstall(
+        credential.baseUrl,
+        credential.installToken,
+        app.appId,
+        input.installWait ?? {},
+      );
+      if (!botToken) throw parkedError(displayName, app.appId, app.installUrl);
+      persistInstalled(rootDir, slug, botToken);
+      return {
+        slug,
+        envSuffix,
+        botToken,
+        appToken: app.appToken,
+        appId: app.appId,
+        reused: false,
+        deferredInstall: true,
+      };
+    }
     throw new SlackFlowError(
       credential.mode === 'broker' ? 'broker' : 'direct-create',
       `Slack refused to auto-install app ${app.appId} (${app.installError ?? 'unknown reason'}). ` +
@@ -564,4 +776,22 @@ export async function provisionSlackApp(input: ProvisionInput): Promise<Provisio
   }
 
   return { slug, envSuffix, botToken: app.botToken, appToken: app.appToken, appId: app.appId, reused: false };
+}
+
+/**
+ * Record a bot token that arrived after the wait, and retire the install URL
+ * that produced it — a consumed link left on disk reads as work still to do.
+ */
+function persistInstalled(rootDir: string, slug: string, botToken: string): void {
+  const { botKey, installUrlKey } = envKeysForSlug(slug);
+  try {
+    upsertEnvKey(rootDir, botKey, botToken);
+    upsertEnvKey(rootDir, installUrlKey, '');
+    appendToEnvList(rootDir, 'SLACK_INSTANCES', slug);
+  } catch (err) {
+    throw new SlackFlowError(
+      'env-write',
+      `failed writing ${botKey} to .env: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }

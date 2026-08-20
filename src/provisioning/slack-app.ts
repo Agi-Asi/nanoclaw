@@ -186,7 +186,12 @@ export interface ProvisionedApp {
   appToken: string;
   /** xoxb-… bot token — absent when auto-install was refused. */
   botToken?: string;
-  /** Manual install URL — the fallback when auto-install was refused. */
+  /**
+   * Install URL for the browser — the fallback when auto-install was refused.
+   * On the broker transport it arrives with its own signed state and stays
+   * valid for days, so a caller can hand it to a human and pick the app up
+   * afterwards with `waitForInstall` instead of provisioning a second one.
+   */
   installUrl: string;
   teamDomain?: string;
   /** managedInstall error when auto-install was refused (e.g. app_approval_request_eligible). */
@@ -509,6 +514,85 @@ export async function requestAvatar(
     }
   }
   return undefined;
+}
+
+// ── Deferred install completion ──
+//
+// A workspace with an admin-approval policy refuses auto-install, so
+// POST /v1/apps answers with `install_url` and no bot token. That URL carries
+// its own signed state and stays valid for days, so the app is not lost — it
+// sits at `pending_install` until someone completes the OAuth install in the
+// browser. These two helpers are the client half of finishing that: ask the
+// service what state the app is in, and wait for the bot token that appears
+// when the install lands.
+
+/** Poll cadence for a pending install — the workspace-connect cadence. */
+export const INSTALL_POLL_INTERVAL_MS = 5_000;
+/** How long a caller waits inline before parking the app and moving on. */
+export const INSTALL_POLL_TIMEOUT_MS = 5 * 60_000;
+
+/** GET /v1/apps/{app_id} — one provisioned app's current state. */
+export interface BrokerAppState {
+  app_id: string;
+  team_id?: string;
+  name?: string;
+  status: 'installed' | 'pending_install' | 'deleted';
+  /**
+   * xoxb-… — released EXACTLY ONCE, on the first read after the install
+   * completes. Absent before the install and on every read after the one that
+   * carried it, so a caller that drops it cannot ask for it again.
+   */
+  bot_token?: string | null;
+}
+
+/**
+ * One app's state. Throws `BrokerHttpError` like every other broker call —
+ * 404 means the service has no such app under this install's credentials.
+ */
+export async function brokerAppStatus(token: string, appId: string): Promise<BrokerAppState> {
+  return brokerRequest<BrokerAppState>('GET', `/v1/apps/${encodeURIComponent(appId)}`, token);
+}
+
+/**
+ * Wait for a pending install to complete, then hand back the one-time bot
+ * token. Resolves null when the wait runs out, when the service does not know
+ * the app (404), and when the app is gone (`deleted`) — all of which mean the
+ * same thing to a caller: stop waiting and offer the manual path. Transient
+ * failures (5xx, a dropped connection) are polled through rather than
+ * surfaced, since the deadline already bounds them.
+ *
+ * A credential refusal is the exception: it is not going to change on the next
+ * poll, and reading it as a timeout would blame the workspace for something
+ * that is the install's to fix, so it is rethrown.
+ */
+export async function waitForInstall(
+  token: string,
+  appId: string,
+  opts: { intervalMs?: number; timeoutMs?: number; onPoll?: (elapsedMs: number) => void } = {},
+): Promise<{ botToken: string } | null> {
+  const intervalMs = opts.intervalMs ?? INSTALL_POLL_INTERVAL_MS;
+  const start = Date.now();
+  const deadline = start + (opts.timeoutMs ?? INSTALL_POLL_TIMEOUT_MS);
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, intervalMs));
+    opts.onPoll?.(Date.now() - start);
+    let state: BrokerAppState;
+    try {
+      state = await brokerAppStatus(token, appId);
+    } catch (err) {
+      if (err instanceof BrokerHttpError && (err.status === 401 || err.status === 403)) throw err;
+      if (err instanceof BrokerHttpError && err.status === 404) return null;
+      continue;
+    }
+    if (state.status === 'deleted') return null;
+    if (state.status === 'installed') {
+      // Installed with no token is the read AFTER the one that released it —
+      // terminal, not slow, so waiting out the deadline would only delay the
+      // manual path by five minutes.
+      return state.bot_token ? { botToken: state.bot_token } : null;
+    }
+  }
+  return null;
 }
 
 /** The broker's POST /v1/apps response shape. */

@@ -42,7 +42,7 @@ import {
   validateAddToRoom,
   validateCreateRoom,
 } from './room-actions.js';
-import { prefetchAvatar, resolveProvisioningCredential } from './provision.js';
+import { pendingInstall, prefetchAvatar, resolveProvisioningCredential } from './provision.js';
 import { SlackFlowError } from './types.js';
 
 /** The Slack gate: the request came in through a Slack-channel session. */
@@ -94,6 +94,7 @@ function successText(
   name: string,
   roomChannelId: string | undefined,
   template?: { ref: string; commit?: string },
+  deferredInstall = false,
 ): string {
   // Provenance rides the ONE completion signal the Slack path emits (the
   // upstream created-notify is suppressed here), so the requester still learns
@@ -101,6 +102,9 @@ function successText(
   const stamped = template
     ? ` Stamped from template "${template.ref}"${template.commit ? ` (commit ${template.commit.slice(0, 7)})` : ' (local copy)'}.`
     : '';
+  // The user already knows they were waiting on their workspace — name what
+  // unblocked it so the relay reads as an ending, not a fresh announcement.
+  const installed = deferredInstall ? ' The workspace approved the install, which is what the wait was for.' : '';
   // room:'none': no shared room was opened — the multi-create
   // pattern finishes with one create_room naming every agent.
   if (roomChannelId === undefined) {
@@ -108,14 +112,16 @@ function successText(
       `Agent "${name}" is live on Slack with its own bot and a DM with the operator. No shared room was ` +
       `opened (room:'none') — when the set is complete, open ONE room for all of them with create_room. ` +
       `It came online just now; if it doesn't respond within a minute, an operator can run: bash setup/lib/restart.sh` +
-      stamped
+      stamped +
+      installed
     );
   }
   return (
     `Agent "${name}" is live on Slack with its own bot. I opened a DM between it and the operator, ` +
     `and a shared room (${roomChannelId}) where you, I, and it can talk — @-mention it there to engage it. ` +
     `It came online just now; if it doesn't respond within a minute, an operator can run: bash setup/lib/restart.sh` +
-    stamped
+    stamped +
+    installed
   );
 }
 
@@ -139,11 +145,68 @@ function failureText(
   );
 }
 
+/**
+ * Run the Slack leg for an already-created agent group and report the outcome.
+ *
+ * `template` is the stamping result createAgent just returned, so it is
+ * present on a fresh create and absent on a resume — by then the stamping is
+ * long done and its commit is not ours to restate.
+ */
+async function runSlackLeg(
+  content: Record<string, unknown>,
+  session: Session,
+  args: {
+    name: string;
+    localName: string;
+    newAgentGroupId: string;
+    slug: string;
+    template?: { ref: string; commit?: string };
+  },
+): Promise<void> {
+  const { name, localName, newAgentGroupId, slug } = args;
+  try {
+    const r = await runSlackAgentFlow({ content, session, newAgentGroupId, slug });
+    await notifyAgent(session, successText(name, r.roomChannelId, args.template, r.deferredInstall));
+  } catch (err) {
+    // SlackApiError carries the flow step id its call site passed to the
+    // shared Slack lib — surface it like a typed flow step.
+    const step = err instanceof SlackFlowError || err instanceof SlackApiError ? err.step : 'unknown';
+    const message = err instanceof Error ? err.message : String(err);
+    await notifyAgent(
+      session,
+      failureText(
+        name,
+        localName,
+        step,
+        message,
+        newAgentGroupId,
+        slug,
+        session.agent_group_id,
+        content.room === 'none',
+      ),
+    );
+    log.error('slack-agent-flow failed', { step });
+  }
+}
+
 async function slackAwareCreateAgent(content: Record<string, unknown>, session: Session): Promise<void> {
   const name = typeof content.name === 'string' ? content.name : '';
   const localName = normalizeName(name);
   const before = await getDestinationByName(session.agent_group_id, localName);
   const slackOrigin = await isSlackOriginSession(session);
+
+  // Resume, not collide: the agent group exists and its Slack app exists, but
+  // the workspace never approved the install, so the flow parked. Asking for
+  // the same agent again is how a user says "finish that" — take them back to
+  // waiting on the app they already have rather than reporting a name clash
+  // (upstream's answer) or provisioning a second one.
+  if (slackOrigin && before?.target_type === 'agent' && name) {
+    const slug = await dedupeSlug(deriveInstanceSlug(name), before.target_id);
+    if (pendingInstall(process.cwd(), slug)) {
+      await runSlackLeg(content, session, { name, localName, newAgentGroupId: before.target_id, slug });
+      return;
+    }
+  }
 
   // Upstream behavior byte-for-byte on non-Slack sessions. On the Slack path
   // the upstream "created — you can now message it" success notify is
@@ -159,30 +222,13 @@ async function slackAwareCreateAgent(content: Record<string, unknown>, session: 
   // Non-Slack sessions (and task/a2a sessions with no messaging group) behave exactly as upstream.
   if (!slackOrigin) return;
 
-  const slug = await dedupeSlug(deriveInstanceSlug(name), after.target_id);
-  try {
-    const r = await runSlackAgentFlow({ content, session, newAgentGroupId: after.target_id, slug });
-    await notifyAgent(session, successText(name, r.roomChannelId, outcome?.template));
-  } catch (err) {
-    // SlackApiError carries the flow step id its call site passed to the
-    // shared Slack lib — surface it like a typed flow step.
-    const step = err instanceof SlackFlowError || err instanceof SlackApiError ? err.step : 'unknown';
-    const message = err instanceof Error ? err.message : String(err);
-    await notifyAgent(
-      session,
-      failureText(
-        name,
-        localName,
-        step,
-        message,
-        after.target_id,
-        slug,
-        session.agent_group_id,
-        content.room === 'none',
-      ),
-    );
-    log.error('slack-agent-flow failed', { step });
-  }
+  await runSlackLeg(content, session, {
+    name,
+    localName,
+    newAgentGroupId: after.target_id,
+    slug: await dedupeSlug(deriveInstanceSlug(name), after.target_id),
+    template: outcome?.template,
+  });
 }
 
 /**

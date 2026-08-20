@@ -3,15 +3,17 @@
  * sequences, whole-doc replace unconstructible), token resolution, response
  * rows into inbound.db, and the HTML→text read-back.
  */
-import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { closeDb, initTestDb, runMigrations } from '../../db/index.js';
 import { createMessagingGroup } from '../../db/messaging-groups.js';
-import { INBOUND_SCHEMA } from '../../db/schema.js';
 import type { MessagingGroup, Session } from '../../types.js';
 import { editCanvas, htmlToReadableText, parseCanvasBlocks, resolveHeadingRegion } from './canvas-api.js';
 import { handleCanvasEdit, handleCanvasRead, resolveSessionBotToken } from './handlers.js';
+
+const { mockWriteSessionMessage } = vi.hoisted(() => ({ mockWriteSessionMessage: vi.fn() }));
+
+vi.mock('../../session-manager.js', () => ({ writeSessionMessage: mockWriteSessionMessage }));
 
 const NOW = new Date().toISOString();
 const MG_ID = 'mg-canvas';
@@ -45,17 +47,11 @@ function makeMg(overrides: Partial<MessagingGroup> = {}): MessagingGroup {
   };
 }
 
-function responseRows(
-  inDb: Database.Database,
-): Array<{ id: string; kind: string; trigger: number; content: Record<string, unknown> }> {
-  return (
-    inDb.prepare('SELECT id, kind, "trigger", content FROM messages_in ORDER BY seq').all() as Array<{
-      id: string;
-      kind: string;
-      trigger: number;
-      content: string;
-    }>
-  ).map((r) => ({ id: r.id, kind: r.kind, trigger: r.trigger, content: JSON.parse(r.content) }));
+function responseRows(): Array<{ id: string; kind: string; trigger: boolean; content: Record<string, unknown> }> {
+  return mockWriteSessionMessage.mock.calls.map((call) => {
+    const row = call[2] as { id: string; kind: string; trigger: boolean; content: string };
+    return { ...row, content: JSON.parse(row.content) };
+  });
 }
 
 /** The chat-note text of an edit-outcome row (canvas_edit notes are kind='chat'). */
@@ -69,14 +65,12 @@ function slackJson(body: Record<string, unknown>): Response {
 }
 
 const fetchMock = vi.fn();
-let inDb: Database.Database;
 
 beforeEach(async () => {
   const db = await initTestDb();
   await runMigrations(db);
   await createMessagingGroup(makeMg());
-  inDb = new Database(':memory:');
-  inDb.exec(INBOUND_SCHEMA);
+  mockWriteSessionMessage.mockReset();
   fetchMock.mockReset();
   vi.stubGlobal('fetch', fetchMock);
   process.env.SLACK_BOT_TOKEN_PIXEL = 'xoxb-pixel-token';
@@ -85,7 +79,6 @@ beforeEach(async () => {
 afterEach(async () => {
   delete process.env.SLACK_BOT_TOKEN_PIXEL;
   vi.unstubAllGlobals();
-  inDb.close();
   await closeDb();
 });
 
@@ -117,7 +110,6 @@ describe('handleCanvasEdit', () => {
     await handleCanvasEdit(
       { action: 'canvas_edit', requestId: 'req-1', canvas_id: 'F0C', op: 'append', markdown: '- [ ] new task' },
       makeSession(),
-      inDb,
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -129,10 +121,10 @@ describe('handleCanvasEdit', () => {
       { operation: 'insert_at_end', document_content: { type: 'markdown', markdown: '- [ ] new task' } },
     ]);
 
-    const rows = responseRows(inDb);
+    const rows = responseRows();
     expect(rows).toHaveLength(1);
     expect(rows[0].id).toBe('canvas-resp-req-1');
-    expect(rows[0].trigger).toBe(0);
+    expect(rows[0].trigger).toBe(false);
     expect(editNoteText(rows[0])).toContain('Canvas edit applied');
   });
 
@@ -152,7 +144,6 @@ describe('handleCanvasEdit', () => {
         markdown: '## Tasks\n\n- [x] done',
       },
       makeSession(),
-      inDb,
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -171,7 +162,7 @@ describe('handleCanvasEdit', () => {
         document_content: { type: 'markdown', markdown: '## Tasks\n\n- [x] done' },
       },
     ]);
-    expect(editNoteText(responseRows(inDb)[0])).toContain('Canvas edit applied');
+    expect(editNoteText(responseRows()[0])).toContain('Canvas edit applied');
   });
 
   it('insert_after_section falls back to insert_after with the looked-up id when the read-back fails', async () => {
@@ -190,7 +181,6 @@ describe('handleCanvasEdit', () => {
         markdown: '> We ship MPIM rooms.',
       },
       makeSession(),
-      inDb,
     );
 
     const [, editInit] = fetchMock.mock.calls[2] as [string, RequestInit];
@@ -204,12 +194,11 @@ describe('handleCanvasEdit', () => {
     await handleCanvasEdit(
       { action: 'canvas_edit', requestId: 'req-4', canvas_id: 'F0C', op: 'replace_section', markdown: 'boom' },
       makeSession(),
-      inDb,
     );
 
     expect(fetchMock).not.toHaveBeenCalled();
-    const rows = responseRows(inDb);
-    expect(rows[0].trigger).toBe(1);
+    const rows = responseRows();
+    expect(rows[0].trigger).toBe(true);
     const note4 = editNoteText(rows[0]);
     expect(note4).toContain('Canvas edit FAILED');
     expect(note4).toContain('section_text');
@@ -230,26 +219,24 @@ describe('handleCanvasEdit', () => {
         markdown: 'x',
       },
       makeSession(),
-      inDb,
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(2); // failed files.info + lookup only
-    const rows = responseRows(inDb);
-    expect(rows[0].trigger).toBe(1);
+    const rows = responseRows();
+    expect(rows[0].trigger).toBe(true);
     expect(editNoteText(rows[0])).toContain('Nonexistent');
   });
 
-  it('a Slack API error becomes a trigger=1 error row', async () => {
+  it('a Slack API error becomes a triggering error row', async () => {
     fetchMock.mockResolvedValueOnce(slackJson({ ok: false, error: 'canvas_not_found' }));
 
     await handleCanvasEdit(
       { action: 'canvas_edit', requestId: 'req-6', canvas_id: 'F0C', op: 'append', markdown: 'x' },
       makeSession(),
-      inDb,
     );
 
-    const rows = responseRows(inDb);
-    expect(rows[0].trigger).toBe(1);
+    const rows = responseRows();
+    expect(rows[0].trigger).toBe(true);
     expect(editNoteText(rows[0])).toContain('canvas_not_found');
   });
 
@@ -284,12 +271,11 @@ describe('duplicate-heading guard (B4)', () => {
         markdown: '## Tasks\n\n- [x] done',
       },
       makeSession(),
-      inDb,
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(2); // files.info + download only — no lookup, no edit
-    const rows = responseRows(inDb);
-    expect(rows[0].trigger).toBe(1);
+    const rows = responseRows();
+    expect(rows[0].trigger).toBe(true);
     const guardNote = editNoteText(rows[0]);
     expect(guardNote).toContain('Canvas edit FAILED');
     expect(guardNote).toContain('replace_section');
@@ -308,11 +294,10 @@ describe('duplicate-heading guard (B4)', () => {
         markdown: '##   tasks  \n\n- [ ] again',
       },
       makeSession(),
-      inDb,
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
-    expect(editNoteText(responseRows(inDb)[0])).toContain('Canvas edit FAILED');
+    expect(editNoteText(responseRows()[0])).toContain('Canvas edit FAILED');
   });
 
   it('a non-duplicate heading passes through — region path, no lookup needed', async () => {
@@ -329,7 +314,6 @@ describe('duplicate-heading guard (B4)', () => {
         markdown: '## Retro notes\n\n- went well',
       },
       makeSession(),
-      inDb,
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(3); // files.info, download, edit — section id from the read-back
@@ -339,7 +323,7 @@ describe('duplicate-heading guard (B4)', () => {
       operation: 'insert_after',
       section_id: 'temp:C:B',
     });
-    expect(editNoteText(responseRows(inDb)[0])).toContain('Canvas edit applied');
+    expect(editNoteText(responseRows()[0])).toContain('Canvas edit applied');
   });
 
   it('a failed read-back never blocks the edit (guard is best-effort)', async () => {
@@ -358,11 +342,10 @@ describe('duplicate-heading guard (B4)', () => {
         markdown: '## Tasks\n\n- [x] done',
       },
       makeSession(),
-      inDb,
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(3); // files.info (failed), lookup, edit
-    expect(editNoteText(responseRows(inDb)[0])).toContain('Canvas edit applied');
+    expect(editNoteText(responseRows()[0])).toContain('Canvas edit applied');
   });
 
   it('markdown without a heading skips the read-back entirely', async () => {
@@ -371,11 +354,10 @@ describe('duplicate-heading guard (B4)', () => {
     await handleCanvasEdit(
       { action: 'canvas_edit', requestId: 'req-g5', canvas_id: 'F0C', op: 'append', markdown: '- [ ] plain item' },
       makeSession(),
-      inDb,
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(1); // straight to canvases.edit
-    expect(editNoteText(responseRows(inDb)[0])).toContain('Canvas edit applied');
+    expect(editNoteText(responseRows()[0])).toContain('Canvas edit applied');
   });
 
   it('replace_section is exempt — replacing a section with its own heading is the point', async () => {
@@ -394,11 +376,10 @@ describe('duplicate-heading guard (B4)', () => {
         markdown: '## Tasks\n\n- [x] done',
       },
       makeSession(),
-      inDb,
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(4); // files.info, download, replace, delete — no refusal
-    expect(editNoteText(responseRows(inDb)[0])).toContain('Canvas edit applied');
+    expect(editNoteText(responseRows()[0])).toContain('Canvas edit applied');
   });
 });
 
@@ -445,7 +426,6 @@ describe('heading-region ops (Slack sections are blocks, not regions)', () => {
         markdown: '## Open Questions\n\n- new list',
       },
       makeSession(),
-      inDb,
     );
 
     expect(fetchMock).toHaveBeenCalledTimes(6);
@@ -456,7 +436,7 @@ describe('heading-region ops (Slack sections are blocks, not regions)', () => {
       { operation: 'delete', section_id: 'temp:C:LI1' },
       { operation: 'delete', section_id: 'temp:C:NB' },
     ]);
-    expect(editNoteText(responseRows(inDb)[0])).toContain('Canvas edit applied');
+    expect(editNoteText(responseRows()[0])).toContain('Canvas edit applied');
   });
 
   it('insert_after_section lands after the LAST block of the region, not the heading', async () => {
@@ -473,7 +453,6 @@ describe('heading-region ops (Slack sections are blocks, not regions)', () => {
         markdown: 'A follow-up paragraph.',
       },
       makeSession(),
-      inDb,
     );
 
     expect(editBodies(2)[0]).toMatchObject({ operation: 'insert_after', section_id: 'temp:C:NB' });
@@ -493,7 +472,6 @@ describe('heading-region ops (Slack sections are blocks, not regions)', () => {
         markdown: 'Right under the Notes heading.',
       },
       makeSession(),
-      inDb,
     );
 
     expect(editBodies(2)[0]).toMatchObject({ operation: 'insert_after', section_id: 'temp:C:NOTES' });
@@ -515,11 +493,10 @@ describe('heading-region ops (Slack sections are blocks, not regions)', () => {
         markdown: '## Open Questions\n\n- new list',
       },
       makeSession(),
-      inDb,
     );
 
-    const rows = responseRows(inDb);
-    expect(rows[0].trigger).toBe(1);
+    const rows = responseRows();
+    expect(rows[0].trigger).toBe(true);
     const partialNote = editNoteText(rows[0]);
     expect(partialNote).toContain('partially applied');
     expect(partialNote).toContain('3 old block(s)');
@@ -557,11 +534,10 @@ describe('checklist tick-state platform limit', () => {
         markdown: '## Tasks\n\n- [x] done one\n- [ ] open one\n- [ ] new one',
       },
       makeSession(),
-      inDb,
     );
 
-    const rows = responseRows(inDb);
-    expect(rows[0].trigger).toBe(1); // warning must wake the agent
+    const rows = responseRows();
+    expect(rows[0].trigger).toBe(true); // warning must wake the agent
     const note = editNoteText(rows[0]);
     expect(note).toContain('Canvas edit applied');
     expect(note).toContain('[x] states in your markdown were NOT applied');
@@ -593,11 +569,10 @@ describe('checklist tick-state platform limit', () => {
         markdown: '## Tasks\n\n- [ ] open one\n- [ ] new one',
       },
       makeSession(),
-      inDb,
     );
 
-    const rows = responseRows(inDb);
-    expect(rows[0].trigger).toBe(0);
+    const rows = responseRows();
+    expect(rows[0].trigger).toBe(false);
     expect(editNoteText(rows[0])).toContain('Canvas edit applied');
   });
 });
@@ -626,7 +601,7 @@ describe('htmlToReadableText checklists', () => {
 });
 
 describe('handleCanvasRead', () => {
-  it('fetches files.info, downloads the HTML, and returns stripped text (trigger=0)', async () => {
+  it('fetches files.info, downloads the HTML, and returns stripped text without waking', async () => {
     fetchMock
       .mockResolvedValueOnce(
         slackJson({ ok: true, file: { id: 'F0C', url_private_download: 'https://files.slack.com/canvas.html' } }),
@@ -637,7 +612,7 @@ describe('handleCanvasRead', () => {
         }),
       );
 
-    await handleCanvasRead({ action: 'canvas_read', requestId: 'req-r1', canvas_id: 'F0C' }, makeSession(), inDb);
+    await handleCanvasRead({ action: 'canvas_read', requestId: 'req-r1', canvas_id: 'F0C' }, makeSession());
 
     const [infoUrl] = fetchMock.mock.calls[0] as [string];
     expect(infoUrl).toBe('https://slack.com/api/files.info?file=F0C');
@@ -645,8 +620,8 @@ describe('handleCanvasRead', () => {
     expect(dlUrl).toBe('https://files.slack.com/canvas.html');
     expect((dlInit.headers as Record<string, string>).Authorization).toBe('Bearer xoxb-pixel-token');
 
-    const rows = responseRows(inDb);
-    expect(rows[0].trigger).toBe(0);
+    const rows = responseRows();
+    expect(rows[0].trigger).toBe(false);
     expect(rows[0].content).toMatchObject({ type: 'canvas_response', requestId: 'req-r1', status: 'ok' });
     const text = (rows[0].content.result as { text: string }).text;
     expect(text).toContain('# Room');
@@ -654,13 +629,13 @@ describe('handleCanvasRead', () => {
     expect(text).not.toContain('temp:C:X');
   });
 
-  it('read failures come back as trigger=0 error rows (the tool is polling)', async () => {
+  it('read failures come back without waking (the tool is polling)', async () => {
     fetchMock.mockResolvedValueOnce(slackJson({ ok: false, error: 'file_not_found' }));
 
-    await handleCanvasRead({ action: 'canvas_read', requestId: 'req-r2', canvas_id: 'F0C' }, makeSession(), inDb);
+    await handleCanvasRead({ action: 'canvas_read', requestId: 'req-r2', canvas_id: 'F0C' }, makeSession());
 
-    const rows = responseRows(inDb);
-    expect(rows[0].trigger).toBe(0);
+    const rows = responseRows();
+    expect(rows[0].trigger).toBe(false);
     expect(rows[0].content).toMatchObject({ status: 'error' });
     expect((rows[0].content.result as { error: string }).error).toContain('file_not_found');
   });

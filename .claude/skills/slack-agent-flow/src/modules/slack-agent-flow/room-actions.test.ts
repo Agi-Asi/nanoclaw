@@ -179,7 +179,7 @@ async function runAction(
 ): Promise<void> {
   const wrapped = getDeliveryAction(action);
   expect(wrapped).toBeDefined();
-  await wrapped!({ action, ...content }, session, undefined as never);
+  await wrapped!({ action, ...content }, session);
 }
 
 function assertNoTokenLeak(): void {

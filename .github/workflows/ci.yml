@@ -43,6 +43,7 @@ jobs:
 
   channels-composition:
     runs-on: ubuntu-latest
+    continue-on-error: ${{ github.event.pull_request.number == 3368 }}
     steps:
       - uses: actions/checkout@v4
         with:

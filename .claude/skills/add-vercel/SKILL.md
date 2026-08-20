@@ -154,9 +154,14 @@ no `vercel` binary on `PATH`.
 ```bash
 . setup/lib/install-slug.sh
 IMAGE="$(container_image_base):latest"
-docker run --rm --entrypoint sh "$IMAGE" -lc 'command -v vercel' >/dev/null 2>&1 \
+docker run --rm --entrypoint sh "$IMAGE" -c 'command -v vercel' >/dev/null 2>&1 \
   && echo "IMAGE_HAS_VERCEL" || echo "IMAGE_MISSING_VERCEL"
 ```
+
+`sh -c`, not `sh -lc`: the global CLIs live in `/pnpm`, which is on the image's
+`ENV PATH` — and a login shell re-reads `/etc/profile`, which resets `PATH`
+without it. Under `-lc` even `agent-browser` looks missing, so the probe would
+report `IMAGE_MISSING_VERCEL` forever no matter how many times you rebuild.
 
 (If the install sets `CONTAINER_RUNTIME` in `.env` to something other than
 `docker` — podman, nerdctl — use that binary here and in Phase 6.)
@@ -247,6 +252,13 @@ for d in data/v2-sessions/*/.claude-shared/skills/vercel-cli; do
   [ -d "$d" ] && [ ! -L "$d" ] && rm -rf "$d" && echo "removed stale copy: $d"
 done
 ```
+
+If that loop found anything, an older `/add-vercel` also froze the group's
+*other* shared skills, and the host will log `Shared skill not symlinked: real
+entry occupies the path` for each on the next spawn. Those are the same stale
+copies, but this skill must not delete them blind: a template-stamped skill is
+legitimately a real directory at that path. Show the operator the warned names
+and let them confirm which are stale before removing any.
 
 ## Phase 6: Restart Running Containers
 

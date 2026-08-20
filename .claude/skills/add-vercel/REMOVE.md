@@ -70,20 +70,37 @@ fi
 ## 4. The Vercel CLI in the container image
 
 Remove the `vercel` entry from `container/cli-tools.json` — this skill added it, and it is
-not part of the base image. Then rebuild so the image matches the manifest:
+not part of the base image. Then make the image match the manifest. **Which
+command does that depends on how this install gets its image**, because a bare
+rebuild cannot subtract:
 
 ```bash
-./container/build.sh
+grep -q '^NANOCLAW_HARDENED_IMAGE=true' .env && echo PULLED || echo SELF_BUILT
 ```
+
+- **SELF_BUILT** — `./container/build.sh` rebuilds from the Dockerfile and installs only what the manifest now lists, so `vercel` is gone.
+- **PULLED** — `./container/build.sh` takes the *overlay* path: one layer `FROM` the tag that already exists, re-applying the manifest. Removing an entry removes nothing; the binary is in a layer underneath and the probe below will say `STILL PRESENT`. Re-fetch the published image instead, which replaces the local tag and drops the overlay with it:
+
+  ```bash
+  ./container/build.sh pull
+  ```
+
+  (`./container/build.sh build` also works, but it is a different decision: it
+  builds from the base *and* flips `NANOCLAW_HARDENED_IMAGE` to false, taking
+  the install off the pulled-image path for good. Only do that if the operator
+  asks for it.)
 
 Confirm the binary is gone (a stale image is the mirror image of the apply-side
 trap — manifest clean, binary still there):
 
 ```bash
 . setup/lib/install-slug.sh
-docker run --rm --entrypoint sh "$(container_image_base):latest" -lc 'command -v vercel' \
+docker run --rm --entrypoint sh "$(container_image_base):latest" -c 'command -v vercel' \
   && echo "STILL PRESENT — rebuild did not take" || echo "REMOVED"
 ```
+
+(`sh -c`, not `sh -lc` — a login shell re-reads `/etc/profile` and drops
+`/pnpm` from `PATH`, which makes every global CLI look absent.)
 
 ## 5. Restart running containers
 

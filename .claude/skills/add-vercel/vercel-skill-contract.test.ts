@@ -128,10 +128,32 @@ describe('add-vercel: image installation is keyed on the image', () => {
     expect(skill).not.toMatch(/grep -q '"vercel"'[\s\S]*skip the rebuild/);
   });
 
+  it('probes with a non-login shell, so /pnpm stays on PATH', () => {
+    // `sh -lc` re-reads /etc/profile inside the image, which resets PATH
+    // without /pnpm — where every global CLI installed from cli-tools.json
+    // lives. Under -lc the probe reports the binary missing forever.
+    for (const [name, text] of Object.entries(docs)) {
+      for (const line of text.split('\n')) {
+        if (!/docker run/.test(line)) continue;
+        expect(line, `${name} probes the image with a login shell: ${line}`).not.toMatch(/\s-lc\b/);
+      }
+    }
+  });
+
   it('derives the image name from the install slug helper', () => {
     // A hardcoded `nanoclaw-agent:latest` is another install's image (or none).
     expect(skill).toContain('setup/lib/install-slug.sh');
     expect(skill).toContain('container_image_base');
+  });
+
+  it('removal knows a bare rebuild cannot subtract on a pulled install', () => {
+    // On NANOCLAW_HARDENED_IMAGE=true, build.sh layers `FROM` the tag that is
+    // already there, so dropping the manifest entry leaves the binary in the
+    // layer underneath. Verified: manifest cleaned + `./container/build.sh` →
+    // `command -v vercel` still resolves. Only re-fetching the published image
+    // replaces the tag.
+    expect(remove).toContain('./container/build.sh pull');
+    expect(remove).toMatch(/NANOCLAW_HARDENED_IMAGE/);
   });
 });
 

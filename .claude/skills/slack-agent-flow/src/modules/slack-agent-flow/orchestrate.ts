@@ -415,6 +415,8 @@ interface FlowArgs {
    * N creates with room:'none' followed by one create_room with all of them.
    */
   room?: 'own' | 'none';
+  /** Template ref the agent was stamped from — broker attribution only. */
+  template?: string;
 }
 
 async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
@@ -450,6 +452,7 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
     description: args.description,
     allowGuests: args.allowGuests,
     requestedBy: operatorUserId,
+    template: args.template,
   });
 
   // S5 adapter-start. The multi-instance module must be installed regardless
@@ -611,6 +614,7 @@ export async function runSlackAgentFlow(args: {
     allowGuests: content.allow_guests === true,
     originSession: session,
     room: content.room === 'none' ? 'none' : 'own',
+    template: typeof content.template === 'string' && content.template ? content.template : undefined,
   });
 }
 

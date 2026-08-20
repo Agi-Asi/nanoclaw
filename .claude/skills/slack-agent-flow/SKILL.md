@@ -58,13 +58,14 @@ test -f src/channels/slack.ts && test -f src/channels/slack-lib.ts && test -f sr
 
 Everything this flow plugs into is standard trunk API — the adapter hot-start
 entry, the delivery batch preview, the create-agent notify option, the
-container tool-extension hook, and the setup wizard's channel registries. This
-is a trunk **version requirement, not an edit**: if the check below fails, the
-NanoClaw trunk is too old for this skill — bring the install up to date
-(`/update-nanoclaw`) instead of patching any of these files by hand:
+decline-and-notify overrides, the container tool-extension hook, and the setup
+wizard's channel registries. This is a trunk **version requirement, not an
+edit**: if the check below fails, the NanoClaw trunk is too old for this skill
+— bring the install up to date (`/update-nanoclaw`) instead of patching any of
+these files by hand:
 
 ```nc:run effect:check
-grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/claude-md-compose.ts && grep -q "await action.decide" src/guard/guard.ts
+grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "dedupeKey?: string" src/modules/permissions/sender-approval.ts && grep -q "declineText?: string" src/modules/permissions/sender-approval.ts && grep -q "fyiText?: string" src/modules/permissions/sender-approval.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/claude-md-compose.ts && grep -q "await action.decide" src/guard/guard.ts
 ```
 
 The last term requires an async-capable guard seam: the flow's `create_agent`
@@ -200,15 +201,16 @@ pnpm run build
 ### 8. Validate
 
 The flow's own tests, the shared feature payload's module tests, and the trunk
-hot-start seam's test (host side), then the container room-tools test, which
-also pins the `create_agent` extension:
+hot-start seam's test run on the host. The room-tool tests run through the
+already-built agent image, so setup does not require Bun on the host; they also
+pin the `create_agent` extension:
 
 ```nc:run effect:test
 pnpm exec vitest run src/modules/slack-agent-flow src/modules/slack-room-membership src/modules/canvas-actions src/modules/slack-onboarding src/env-file.test.ts src/channels/adapter-hot-start.test.ts
 ```
 
 ```nc:run effect:test
-cd container/agent-runner && bun test src/mcp-tools/rooms.test.ts src/mcp-tools/canvas.test.ts
+source "$PWD/setup/lib/install-slug.sh" && "${CONTAINER_RUNTIME:-docker}" run --rm --entrypoint bun --workdir /app --volume "$PWD/container/agent-runner/src:/app/src:ro" "$(container_image_base):latest" test src/mcp-tools/rooms.test.ts src/mcp-tools/canvas.test.ts
 ```
 
 ### 9. Restart the host

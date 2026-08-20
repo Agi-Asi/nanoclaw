@@ -21,34 +21,36 @@ const WHATSAPP_CLOUD_DEFAULTS: ChannelDefaults = {
   mentions: 'platform',
 };
 
+export function createWhatsAppCloudBridge() {
+  const env = readEnvFile([
+    'WHATSAPP_ACCESS_TOKEN',
+    'WHATSAPP_PHONE_NUMBER_ID',
+    'WHATSAPP_APP_SECRET',
+    'WHATSAPP_VERIFY_TOKEN',
+  ]);
+  if (!env.WHATSAPP_ACCESS_TOKEN) return null;
+  const whatsappAdapter = createWhatsAppAdapter({
+    accessToken: env.WHATSAPP_ACCESS_TOKEN,
+    phoneNumberId: env.WHATSAPP_PHONE_NUMBER_ID,
+    appSecret: env.WHATSAPP_APP_SECRET,
+    verifyToken: env.WHATSAPP_VERIFY_TOKEN,
+  });
+  // `@chat-adapter/whatsapp` hardcodes name = 'whatsapp', which the bridge
+  // uses as channelType. Without a distinct instance the registry would key
+  // this bridge under 'whatsapp' and collide with the native Baileys adapter
+  // (src/channels/whatsapp.ts, also channelType 'whatsapp') — last-write-wins
+  // silently kills one channel. The instance key keeps them apart while
+  // channelType stays 'whatsapp' (the semantic platform key). See #2911.
+  return createChatSdkBridge({
+    adapter: whatsappAdapter,
+    instance: 'whatsapp-cloud',
+    concurrency: 'concurrent',
+    supportsThreads: false,
+    defaults: WHATSAPP_CLOUD_DEFAULTS,
+  });
+}
+
 registerChannelAdapter('whatsapp-cloud', {
-  factory: () => {
-    const env = readEnvFile([
-      'WHATSAPP_ACCESS_TOKEN',
-      'WHATSAPP_PHONE_NUMBER_ID',
-      'WHATSAPP_APP_SECRET',
-      'WHATSAPP_VERIFY_TOKEN',
-    ]);
-    if (!env.WHATSAPP_ACCESS_TOKEN) return null;
-    const whatsappAdapter = createWhatsAppAdapter({
-      accessToken: env.WHATSAPP_ACCESS_TOKEN,
-      phoneNumberId: env.WHATSAPP_PHONE_NUMBER_ID,
-      appSecret: env.WHATSAPP_APP_SECRET,
-      verifyToken: env.WHATSAPP_VERIFY_TOKEN,
-    });
-    // `@chat-adapter/whatsapp` hardcodes name = 'whatsapp', which the bridge
-    // uses as channelType. Without a distinct instance the registry would key
-    // this bridge under 'whatsapp' and collide with the native Baileys adapter
-    // (src/channels/whatsapp.ts, also channelType 'whatsapp') — last-write-wins
-    // silently kills one channel. The instance key keeps them apart while
-    // channelType stays 'whatsapp' (the semantic platform key). See #2911.
-    return createChatSdkBridge({
-      adapter: whatsappAdapter,
-      instance: 'whatsapp-cloud',
-      concurrency: 'concurrent',
-      supportsThreads: false,
-      defaults: WHATSAPP_CLOUD_DEFAULTS,
-    });
-  },
+  factory: createWhatsAppCloudBridge,
   defaults: WHATSAPP_CLOUD_DEFAULTS,
 });

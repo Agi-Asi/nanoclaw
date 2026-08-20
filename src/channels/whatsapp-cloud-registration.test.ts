@@ -43,7 +43,8 @@ vi.mock('../env.js', () => ({
   }),
 }));
 
-import { getRegisteredChannelNames, getChannelRegistration } from './channel-registry.js';
+import { getRegisteredChannelNames } from './channel-registry.js';
+import { createWhatsAppCloudBridge } from './whatsapp-cloud.js';
 import './index.js'; // the real barrel — triggers every channel's self-registration
 
 describe('whatsapp-cloud channel registration', () => {
@@ -52,10 +53,7 @@ describe('whatsapp-cloud channel registration', () => {
   });
 
   it('builds under a distinct instance key while keeping channelType whatsapp', async () => {
-    const registration = getChannelRegistration('whatsapp-cloud');
-    expect(registration).toBeDefined();
-
-    const adapter = await registration!.factory();
+    const adapter = createWhatsAppCloudBridge();
     expect(adapter).not.toBeNull();
 
     // instance keeps this bridge off the native Baileys adapter's 'whatsapp'

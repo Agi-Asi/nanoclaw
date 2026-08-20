@@ -50,15 +50,15 @@ interface ReasonArming {
 
 /**
  * Approvers waiting to type a rejection reason, keyed by their DM channel
- * (`<channelType>:<dmPlatformId>`). A DM's platform id is unique per user, so
+ * (`<instance>:<dmPlatformId>`). A DM's platform id is unique per user, so
  * the inbound reply matches by channel alone — no sender re-parsing needed, and
  * a group message can never collide with an armed DM. Cleared on receipt,
  * staleness, or restart.
  */
 const awaitingReason = new Map<string, ReasonArming>();
 
-function dmKey(channelType: string, platformId: string): string {
-  return `${channelType}:${platformId}`;
+function dmKey(channelType: string, platformId: string, instance: string = channelType): string {
+  return `${instance}:${platformId}`;
 }
 
 function clampReason(raw: string): string {
@@ -86,7 +86,9 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
   const expiresAt = new Date(Date.now() + REASON_CAPTURE_WINDOW_MS).toISOString();
   if (!(await markApprovalAwaitingReason(approval.approval_id, expiresAt))) return;
 
-  const dm = userId ? await ensureUserDm(userId) : null;
+  const dm = userId
+    ? await ensureUserDm(userId, approval.instance === null ? undefined : { instance: approval.instance })
+    : null;
   const adapter = getDeliveryAdapter();
   if (!dm || !adapter) {
     log.warn('reject-with-reason: cannot reach approver, finalizing plain reject', {
@@ -100,7 +102,15 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
   }
 
   try {
-    await adapter.deliver(dm.channel_type, dm.platform_id, null, 'chat-sdk', JSON.stringify({ text: PROMPT_TEXT }));
+    await adapter.deliver(
+      dm.channel_type,
+      dm.platform_id,
+      null,
+      'chat-sdk',
+      JSON.stringify({ text: PROMPT_TEXT }),
+      undefined,
+      dm.instance,
+    );
   } catch (err) {
     log.error('reject-with-reason: reason prompt delivery failed, finalizing plain reject', {
       approvalId: approval.approval_id,
@@ -112,7 +122,10 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
 
   // Prompt is out — now hold the row and arm capture. Order matters: a reply
   // can't arrive before the prompt is read, so there's no lost-message window.
-  awaitingReason.set(dmKey(dm.channel_type, dm.platform_id), { approvalId: approval.approval_id, userId });
+  awaitingReason.set(dmKey(dm.channel_type, dm.platform_id, dm.instance), {
+    approvalId: approval.approval_id,
+    userId,
+  });
   log.info('reject-with-reason: awaiting reason reply', { approvalId: approval.approval_id, userId });
 }
 
@@ -124,11 +137,12 @@ export async function armReasonCapture(approval: PendingApproval, session: Sessi
  * Exported for tests; registered as the interceptor below.
  */
 export async function captureReasonReply(event: InboundEvent): Promise<boolean> {
-  const arming = awaitingReason.get(dmKey(event.channelType, event.platformId));
+  const key = dmKey(event.channelType, event.platformId, event.instance);
+  const arming = awaitingReason.get(key);
   if (!arming) return false;
 
   // This DM is an armed reason channel — disarm regardless of outcome.
-  awaitingReason.delete(dmKey(event.channelType, event.platformId));
+  awaitingReason.delete(key);
 
   const approval = await getPendingApproval(arming.approvalId);
   if (!approval || approval.status !== 'awaiting_reason') {

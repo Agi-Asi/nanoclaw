@@ -86,8 +86,9 @@ beforeEach(async () => {
     created_at: now(),
   });
   await getDb().run(
-    `INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at) VALUES (?, ?, ?, ?)`,
+    `INSERT INTO user_dms (user_id, channel_type, instance, messaging_group_id, resolved_at) VALUES (?, ?, ?, ?, ?)`,
     'telegram:owner',
+    'telegram',
     'telegram',
     'mg-dm-owner',
     now(),

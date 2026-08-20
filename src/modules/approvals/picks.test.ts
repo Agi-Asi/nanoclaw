@@ -7,13 +7,17 @@ import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 
 import type { ChannelAdapter, OutboundMessage } from '../../channels/adapter.js';
 import {
+  createChannelDeliveryAdapter,
   initChannelAdapters,
   registerChannelAdapter,
   teardownChannelAdapters,
 } from '../../channels/channel-registry.js';
 import { closeDb, createAgentGroup, initTestDb, runMigrations } from '../../db/index.js';
+import { createMessagingGroup } from '../../db/messaging-groups.js';
+import { setDeliveryAdapter } from '../../delivery.js';
 import { createUser } from '../permissions/db/users.js';
 import { grantRole } from '../permissions/db/user-roles.js';
+import { requestChannelApproval } from '../permissions/channel-approval.js';
 import { pickApprovalDelivery, pickApprover } from './primitive.js';
 
 function now(): string {
@@ -33,12 +37,14 @@ afterEach(async () => {
 async function mountMockAdapter(
   channelType: string,
   openDM?: (handle: string) => Promise<string>,
+  instance: string = channelType,
 ): Promise<{ delivered: OutboundMessage[]; openDMCalls: string[] }> {
   const delivered: OutboundMessage[] = [];
   const openDMCalls: string[] = [];
   const adapter: ChannelAdapter = {
-    name: channelType,
+    name: instance,
     channelType,
+    instance,
     supportsThreads: false,
     async setup() {},
     async teardown() {},
@@ -57,7 +63,7 @@ async function mountMockAdapter(
       return openDM(handle);
     };
   }
-  registerChannelAdapter(channelType, { factory: () => adapter });
+  registerChannelAdapter(instance, { factory: () => adapter });
   await initChannelAdapters(() => ({
     conversations: [],
     onInbound: () => {},
@@ -142,5 +148,53 @@ describe('pickApprovalDelivery', () => {
   it('returns null when nobody is reachable', async () => {
     await seedUser('telegram:111', 'telegram');
     expect(await pickApprovalDelivery(['telegram:111'], 'telegram')).toBeNull();
+  });
+
+  it('uses the originating instance instead of a sibling cached DM', async () => {
+    const instanceA = await mountMockAdapter('slack', async (handle) => `D-A-${handle}`, 'slack-a');
+    const instanceB = await mountMockAdapter('slack', async (handle) => `D-B-${handle}`, 'slack-b');
+    await seedUser('slack:admin', 'slack');
+    await grantRole({
+      user_id: 'slack:admin',
+      role: 'owner',
+      agent_group_id: null,
+      granted_by: null,
+      granted_at: now(),
+    });
+
+    const cachedA = await pickApprovalDelivery(['slack:admin'], 'slack', 'slack-a');
+    expect(cachedA?.messagingGroup.platform_id).toBe('D-A-admin');
+
+    await createMessagingGroup({
+      id: 'mg-origin-b',
+      channel_type: 'slack',
+      platform_id: 'C-B',
+      instance: 'slack-b',
+      name: 'Approvals',
+      is_group: 1,
+      unknown_sender_policy: 'request_approval',
+      created_at: now(),
+    });
+    setDeliveryAdapter(createChannelDeliveryAdapter());
+    await requestChannelApproval({
+      messagingGroupId: 'mg-origin-b',
+      event: {
+        channelType: 'slack',
+        instance: 'slack-b',
+        platformId: 'C-B',
+        threadId: null,
+        message: {
+          id: 'msg-b',
+          kind: 'chat-sdk',
+          content: JSON.stringify({ senderId: 'slack:caller', senderName: 'Caller' }),
+          timestamp: now(),
+          isMention: true,
+          isGroup: true,
+        },
+      },
+    });
+
+    expect(instanceA.delivered).toHaveLength(0);
+    expect(instanceB.delivered).toHaveLength(1);
   });
 });

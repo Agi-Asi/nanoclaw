@@ -97,15 +97,16 @@ CREATE TABLE agent_group_members (
   PRIMARY KEY (user_id, agent_group_id)
 );
 
--- Cached mapping from (user, channel) to the DM messaging group. Lets the
+-- Cached mapping from (user, channel, adapter instance) to the DM messaging group. Lets the
 -- host initiate cold DMs (pairing, approvals) without reprobing the
 -- platform API on every send. Populated lazily by ensureUserDm().
 CREATE TABLE user_dms (
   user_id            TEXT NOT NULL REFERENCES users(id),
   channel_type       TEXT NOT NULL,
+  instance           TEXT NOT NULL,
   messaging_group_id TEXT NOT NULL REFERENCES messaging_groups(id),
   resolved_at        TEXT NOT NULL,
-  PRIMARY KEY (user_id, channel_type)
+  PRIMARY KEY (user_id, channel_type, instance)
 );
 
 -- Sessions: one folder = one session = one container when running

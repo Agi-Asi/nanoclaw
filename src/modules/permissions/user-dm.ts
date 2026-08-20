@@ -22,17 +22,17 @@
  *
  * ## Caching
  *
- * Successful resolutions are persisted in `user_dms (user_id, channel_type
- * → messaging_group_id)`. The cache survives restarts; first-time DMs on a
- * given channel pay one `openDM` round trip, everyone after is a pure DB
- * read.
+ * Successful resolutions are persisted in `user_dms (user_id, channel_type,
+ * instance → messaging_group_id)`. The cache survives restarts; first-time
+ * DMs on a given channel pay one `openDM` round trip, everyone after is a
+ * pure DB read.
  *
  * The underlying platform APIs (`POST /users/@me/channels` on Discord,
  * `conversations.open` on Slack, etc.) are idempotent and return the same
  * channel on repeated calls, so re-resolving after a cache miss is always
  * safe — worst case we round-trip redundantly.
  */
-import { getChannelAdapter } from '../../channels/channel-registry.js';
+import { getChannelAdapter, getChannelAdapterExact } from '../../channels/channel-registry.js';
 import { getMessagingGroup, getMessagingGroupByPlatform, createMessagingGroup } from '../../db/messaging-groups.js';
 import { log } from '../../log.js';
 import type { MessagingGroup, User } from '../../types.js';
@@ -53,7 +53,7 @@ import { getUserDm, upsertUserDm } from './db/user-dms.js';
  */
 export async function ensureUserDm(
   userId: string,
-  { privacySafeLogs = false }: { privacySafeLogs?: boolean } = {},
+  { privacySafeLogs = false, instance }: { privacySafeLogs?: boolean; instance?: string } = {},
 ): Promise<MessagingGroup | null> {
   const user = await getUser(userId);
   if (!user) {
@@ -68,7 +68,7 @@ export async function ensureUserDm(
   }
 
   // Cache hit: existing user_dms row → load and return the messaging_group.
-  const cached = await getUserDm(userId, channelType);
+  const cached = await getUserDm(userId, channelType, instance);
   if (cached) {
     const mg = await getMessagingGroup(cached.messaging_group_id);
     if (mg) return mg;
@@ -80,19 +80,20 @@ export async function ensureUserDm(
   }
 
   // Cache miss: resolve the DM platform_id either via openDM or directly.
-  const dmPlatformId = await resolveDmPlatformId(channelType, handle, privacySafeLogs);
+  const dmPlatformId = await resolveDmPlatformId(channelType, handle, privacySafeLogs, instance);
   if (!dmPlatformId) return null;
 
   // Find-or-create the underlying messaging_group. A DM we received
   // earlier may already have a row matching (channel_type, platform_id).
   const now = new Date().toISOString();
-  let mg = await getMessagingGroupByPlatform(channelType, dmPlatformId);
+  let mg = await getMessagingGroupByPlatform(channelType, dmPlatformId, instance);
   if (!mg) {
     const mgId = `mg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     mg = {
       id: mgId,
       channel_type: channelType,
       platform_id: dmPlatformId,
+      instance: instance ?? channelType,
       name: user.display_name,
       is_group: 0,
       // Deliberately 'strict', NOT the channel's declared DM policy: this row
@@ -112,6 +113,7 @@ export async function ensureUserDm(
   await upsertUserDm({
     user_id: userId,
     channel_type: channelType,
+    instance: mg.instance ?? channelType,
     messaging_group_id: mg.id,
     resolved_at: now,
   });
@@ -127,10 +129,11 @@ async function resolveDmPlatformId(
   channelType: string,
   handle: string,
   privacySafeLogs: boolean,
+  instance?: string,
 ): Promise<string | null> {
-  const adapter = getChannelAdapter(channelType);
+  const adapter = instance === undefined ? getChannelAdapter(channelType) : getChannelAdapterExact(instance);
   if (!adapter) {
-    log.warn('ensureUserDm: no adapter for channel', { channelType });
+    log.warn('ensureUserDm: no adapter for channel', { channelType, instance });
     return null;
   }
   if (!adapter.openDM) {

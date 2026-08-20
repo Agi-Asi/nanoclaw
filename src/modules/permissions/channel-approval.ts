@@ -260,7 +260,7 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
     }
   }
 
-  const delivery = await pickApprovalDelivery(approvers, originChannelType);
+  const delivery = await pickApprovalDelivery(approvers, originChannelType, originMg?.instance);
   if (!delivery) {
     log.warn('Channel registration skipped — no DM channel for any approver', {
       messagingGroupId,
@@ -323,6 +323,8 @@ export async function requestChannelApproval(input: RequestChannelApprovalInput)
         question,
         options,
       }),
+      undefined,
+      delivery.messagingGroup.instance,
     );
     log.info('Channel registration card delivered', {
       messagingGroupId,

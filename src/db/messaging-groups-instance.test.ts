@@ -95,7 +95,7 @@ describe('migration 016 — wired legacy DB upgrade (the FK recreate arm)', () =
     // Bring the DB to the pre-016 schema.
     await runMigrations(
       db,
-      migrations.filter((m) => m.name !== 'messaging-group-instance'),
+      migrations.filter((m) => m.name !== 'messaging-group-instance' && m.name !== 'user-dms-instance'),
     );
     const preCols = sqliteRaw(db).prepare("PRAGMA table_info('messaging_groups')").all() as Array<{ name: string }>;
     expect(preCols.some((c) => c.name === 'instance')).toBe(false);
@@ -127,7 +127,12 @@ describe('migration 016 — wired legacy DB upgrade (the FK recreate arm)', () =
 
     // Upgrade: only 016 is pending now. Without disableForeignKeys this
     // throws 'FOREIGN KEY constraint failed' at DROP TABLE.
-    await expect(runMigrations(db)).resolves.toBeUndefined();
+    await expect(
+      runMigrations(
+        db,
+        migrations.filter((m) => m.name !== 'user-dms-instance'),
+      ),
+    ).resolves.toBeUndefined();
 
     // Backfill: existing row got instance = channel_type.
     const row = sqliteRaw(db).prepare("SELECT instance FROM messaging_groups WHERE id = 'mg-1'").get() as {
@@ -152,7 +157,7 @@ describe('migration 016 — wired legacy DB upgrade (the FK recreate arm)', () =
     const db = await initSqliteTestDb();
     await runMigrations(
       db,
-      migrations.filter((m) => m.name !== 'messaging-group-instance'),
+      migrations.filter((m) => m.name !== 'messaging-group-instance' && m.name !== 'user-dms-instance'),
     );
 
     // Seed the orphan class that demonstrably exists on live installs
@@ -174,7 +179,12 @@ describe('migration 016 — wired legacy DB upgrade (the FK recreate arm)', () =
     // 016 did not create this violation — it must still apply (the runner
     // diffs post-up violations against a pre-up snapshot and only throws
     // on NEW ones; pre-existing ones are warned about and carried through).
-    await expect(runMigrations(db)).resolves.toBeUndefined();
+    await expect(
+      runMigrations(
+        db,
+        migrations.filter((m) => m.name !== 'user-dms-instance'),
+      ),
+    ).resolves.toBeUndefined();
     const cols = sqliteRaw(db).prepare("PRAGMA table_info('messaging_groups')").all() as Array<{ name: string }>;
     expect(cols.some((c) => c.name === 'instance')).toBe(true);
 
@@ -194,8 +204,8 @@ describe('migration 016 — wired legacy DB upgrade (the FK recreate arm)', () =
       up: (d) => {
         d.prepare("INSERT INTO users (id, kind, created_at) VALUES ('slack:U-rogue', 'slack', datetime('now'))").run();
         d.prepare(
-          `INSERT INTO user_dms (user_id, channel_type, messaging_group_id, resolved_at)
-           VALUES ('slack:U-rogue', 'slack', 'mg-never-existed', datetime('now'))`,
+          `INSERT INTO user_dms (user_id, channel_type, instance, messaging_group_id, resolved_at)
+           VALUES ('slack:U-rogue', 'slack', 'slack', 'mg-never-existed', datetime('now'))`,
         ).run();
       },
     };

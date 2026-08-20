@@ -17,6 +17,7 @@ import {
   readInstallToken,
   readManagerToken,
   readServiceBase,
+  slackAppInstallUrl,
   slackServiceForRegistry,
 } from './slack-app.js';
 
@@ -188,6 +189,7 @@ describe('provisionManagedApp attribution fields', () => {
       client_version: '2.2.0',
     });
     expect(app.botToken).toBe('xoxb-1');
+    expect(app.installUrl).toBe('https://api.slack.com/apps/A1/oauth');
 
     const createCall = fetchMock.mock.calls.find(([url]) => url === 'https://slack.com/api/apps.manifest.create');
     expect(createCall).toBeDefined();
@@ -195,6 +197,12 @@ describe('provisionManagedApp attribution fields', () => {
     expect([...params.keys()].sort()).toEqual(['generate_app_token', 'manifest']);
     // The manifest is byte-identical to one built without attribution fields.
     expect(JSON.parse(params.get('manifest')!)).toEqual(buildManagedAppManifest({ name: 'Trusty' }));
+  });
+});
+
+describe('manual install URL', () => {
+  it("uses Slack's app settings page instead of the unusable raw OAuth URL", () => {
+    expect(slackAppInstallUrl('A0TEST123')).toBe('https://api.slack.com/apps/A0TEST123/oauth');
   });
 });
 
@@ -364,7 +372,7 @@ describe('mapBrokerApp', () => {
       appId: 'A0TEST123',
       appToken: 'xapp-1-A0TEST123-x',
       botToken: 'xoxb-000-bot',
-      installUrl: 'https://slack.com/oauth/install/A0TEST123',
+      installUrl: 'https://api.slack.com/apps/A0TEST123/oauth',
       installError: undefined,
     });
   });
@@ -379,16 +387,16 @@ describe('mapBrokerApp', () => {
     });
     expect(app.botToken).toBeUndefined();
     expect(app.installError).toBe('app_approval_request_eligible');
-    expect(app.installUrl).toBe('https://slack.com/oauth/install/A0TEST123');
+    expect(app.installUrl).toBe('https://api.slack.com/apps/A0TEST123/oauth');
   });
 
-  it('tolerates absent optional fields — installUrl falls back to empty string', () => {
+  it('derives the install page even when the broker omits its legacy URL', () => {
     const app = mapBrokerApp({ app_id: 'A1', app_token: 'xapp-1' });
     expect(app).toEqual({
       appId: 'A1',
       appToken: 'xapp-1',
       botToken: undefined,
-      installUrl: '',
+      installUrl: 'https://api.slack.com/apps/A1/oauth',
       installError: undefined,
     });
   });

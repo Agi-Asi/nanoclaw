@@ -14,7 +14,9 @@
  *
  * Auto-install does not bypass Admin Approved Apps: on workspaces where the
  * admin rules reject it, managedInstall errors and the caller falls back to
- * the manual install URL (oauth_authorize_url from step 1).
+ * the generated app's OAuth & Permissions settings page. The raw
+ * oauth_authorize_url from step 1 is not usable without a configured OAuth
+ * callback and fails with redirect_uri_mismatch.
  *
  * The manager token is read from SLACK_MANAGER_TOKEN (process env or .env).
  * It never persists into the container or session env — only the derived
@@ -193,6 +195,11 @@ export interface ProvisionedApp {
   installError?: string;
 }
 
+/** Slack's native install surface for an app created in this workspace. */
+export function slackAppInstallUrl(appId: string): string {
+  return `https://api.slack.com/apps/${encodeURIComponent(appId)}/oauth`;
+}
+
 interface SlackApiResponse {
   ok: boolean;
   error?: string;
@@ -228,7 +235,6 @@ export async function provisionManagedApp(managerToken: string, spec: ManagedApp
     SlackApiResponse & {
       app_id?: string;
       app_token?: string;
-      oauth_authorize_url?: string;
       team_domain?: string;
     }
   >('apps.manifest.create', managerToken, {
@@ -245,7 +251,7 @@ export async function provisionManagedApp(managerToken: string, spec: ManagedApp
   const result: ProvisionedApp = {
     appId: created.app_id,
     appToken: created.app_token,
-    installUrl: created.oauth_authorize_url ?? '',
+    installUrl: slackAppInstallUrl(created.app_id),
     teamDomain: created.team_domain,
   };
 
@@ -520,6 +526,7 @@ export interface BrokerAppResponse {
   app_token: string;
   /** xoxb-… bot token — null when auto-install was refused. */
   bot_token?: string | null;
+  /** Legacy raw OAuth URL; clients derive the working settings URL from app_id. */
   install_url?: string | null;
   install_error?: string | null;
 }
@@ -533,7 +540,7 @@ export function mapBrokerApp(res: BrokerAppResponse): ProvisionedApp {
     appId: res.app_id,
     appToken: res.app_token,
     botToken: res.bot_token ?? undefined,
-    installUrl: res.install_url ?? '',
+    installUrl: slackAppInstallUrl(res.app_id),
     installError: res.install_error ?? undefined,
   };
 }

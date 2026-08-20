@@ -186,6 +186,11 @@ interface RawProvisioned {
   installError?: string;
 }
 
+/** Slack's native install surface; raw OAuth URLs need a callback we do not have. */
+export function slackAppInstallUrl(appId: string): string {
+  return `https://api.slack.com/apps/${encodeURIComponent(appId)}/oauth`;
+}
+
 /**
  * Optional request-origin metadata on the broker's POST /v1/apps body
  * (requested_by / parent_app_id / template / client_version on the wire).
@@ -400,7 +405,7 @@ async function provisionViaBroker(
     appId,
     appToken,
     botToken: pick(data.botToken, data.bot_token),
-    installUrl: pick(data.installUrl, data.install_url),
+    installUrl: slackAppInstallUrl(appId),
     installError: pick(data.installError, data.install_error),
   };
 }
@@ -440,12 +445,14 @@ async function provisionDirect(
   displayName: string,
   allowGuests = false,
 ): Promise<RawProvisioned> {
-  const created = await slackApi<
-    SlackApiResponse & { app_id?: string; app_token?: string; oauth_authorize_url?: string }
-  >('apps.manifest.create', managerToken, {
-    manifest: JSON.stringify(buildManagedAppManifest(displayName, { agentView: !allowGuests })),
-    generate_app_token: 'true',
-  });
+  const created = await slackApi<SlackApiResponse & { app_id?: string; app_token?: string }>(
+    'apps.manifest.create',
+    managerToken,
+    {
+      manifest: JSON.stringify(buildManagedAppManifest(displayName, { agentView: !allowGuests })),
+      generate_app_token: 'true',
+    },
+  );
   if (!created.ok || !created.app_id) {
     throw new SlackFlowError(
       'direct-create',
@@ -461,7 +468,7 @@ async function provisionDirect(
   const result: RawProvisioned = {
     appId: created.app_id,
     appToken: created.app_token,
-    installUrl: created.oauth_authorize_url ?? '',
+    installUrl: slackAppInstallUrl(created.app_id),
   };
   const installed = await slackApi<SlackApiResponse & { api_access_tokens?: { bot_access_token?: string } }>(
     'apps.managedInstall',

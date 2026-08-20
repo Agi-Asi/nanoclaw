@@ -27,6 +27,7 @@ import {
   buildManagedAppManifest,
   provisionSlackApp,
   resolveProvisioningCredential,
+  slackAppInstallUrl,
 } from './provision.js';
 
 const CREATE_AGENT_SCRIPT = path.resolve(
@@ -188,6 +189,12 @@ describe('provision.ts congruence with src/provisioning/slack-app.ts', () => {
     expect(src).toContain("'SLACK_SERVICE_BASE'");
     expect(src).toContain("'/v1/apps'");
   });
+
+  it('derives the same working manual-install page from the app id', () => {
+    expect(slackAppInstallUrl('A0TEST123')).toBe('https://api.slack.com/apps/A0TEST123/oauth');
+    const src = fs.readFileSync(SLACK_PROVISION, 'utf-8');
+    expect(src).toContain('https://api.slack.com/apps/${encodeURIComponent(appId)}/oauth');
+  });
 });
 
 describe('provisionSlackApp broker body (allow_guests threading)', () => {
@@ -237,6 +244,32 @@ describe('provisionSlackApp broker body (allow_guests threading)', () => {
   it('threads allowGuests:true into the body as allow_guests (plain variant)', async () => {
     await provisionSlackApp({ slug: 'pixel', displayName: 'Pixel', rootDir, teamId: 'T1', allowGuests: true });
     expect(createBody()).toEqual({ team_id: 'T1', name: 'Pixel', allow_guests: true });
+  });
+
+  it('surfaces the app settings page when the broker returns an unusable raw OAuth URL', async () => {
+    fetchMock.mockImplementation(async (url: string | URL) => {
+      const u = String(url);
+      if (u.endsWith('/v1/avatars')) {
+        return new Response(JSON.stringify({ avatar_id: null, status: 'unavailable' }), { status: 200 });
+      }
+      if (u.endsWith('/v1/apps')) {
+        return new Response(
+          JSON.stringify({
+            app_id: 'A123',
+            app_token: 'xapp-test',
+            bot_token: null,
+            install_url: 'https://slack.com/oauth/v2/authorize?client_id=broken',
+            install_error: 'app_approval_request_denied',
+          }),
+          { status: 201 },
+        );
+      }
+      throw new Error(`unexpected fetch: ${u}`);
+    });
+
+    await expect(provisionSlackApp({ slug: 'pixel', displayName: 'Pixel', rootDir, teamId: 'T1' })).rejects.toThrow(
+      'https://api.slack.com/apps/A123/oauth',
+    );
   });
 });
 

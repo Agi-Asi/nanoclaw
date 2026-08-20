@@ -17,9 +17,12 @@ import { join } from 'node:path';
 
 import * as p from '@clack/prompts';
 
+vi.mock('../lib/claude-handoff.js', () => ({ offerClaudeOnFailure: vi.fn(async () => false) }));
+
 import { runChannelSkill, runChannelSkillWithPreStep } from './run-channel-skill.js';
 import { registerChannelPreStep, registerCompanionSkills } from './companions.js';
 import { BACK_TO_CHANNEL_SELECTION } from '../lib/back-nav.js';
+import { offerClaudeOnFailure } from '../lib/claude-handoff.js';
 
 /** Write a channel install skill that resolves the wire inputs and, when the
  *  channel needs one, consumes a `token` prompt (validate-gated so only a
@@ -261,8 +264,18 @@ describe('companion skills', () => {
     // and appended barrel imports before failing, and restarting could boot
     // that half-applied state. The operator is told to repair, then restart.
     expect(cmds.filter((c) => c === 'bash setup/lib/restart.sh')).toHaveLength(0);
-    const held = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('Skipping the deferred service restart'));
+    const held = warn.mock.calls
+      .map((c) => String(c[0]))
+      .filter((m) => m.includes('Skipping the deferred service restart'));
     expect(held).toHaveLength(1);
+    expect(offerClaudeOnFailure).toHaveBeenCalledExactlyOnceWith(
+      {
+        stepName: 'fixturedeg-companion-skills',
+        msg: "Couldn't fully apply companion skill fixture-companion-bad.",
+        hint: 'See logs/setup-steps/ for details, then use the re-apply command shown above.',
+      },
+      root,
+    );
   });
 
   it('no declaration: no companion runs, no deferred restart (unchanged flow)', async () => {

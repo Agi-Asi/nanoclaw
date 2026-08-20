@@ -25,6 +25,7 @@ import { firstFailureHint, fullyApplied } from '../../scripts/skill-apply.js';
 import * as setupLog from '../logs.js';
 import { BACK_TO_CHANNEL_SELECTION, backGate, type ChannelFlowResult } from '../lib/back-nav.js';
 import { askOperatorRole, type OperatorRole } from '../lib/role-prompt.js';
+import { offerClaudeOnFailure } from '../lib/claude-handoff.js';
 import { ensureAnswer, fail, runQuietChild } from '../lib/runner.js';
 import { channelsRemote, hostExec, runSkill, type RunSkillOptions } from '../lib/skill-driver.js';
 import { clearTemplatePick } from '../templates.js';
@@ -107,10 +108,10 @@ async function applyCompanionSkills(
 ): Promise<void> {
   const companions = getCompanionSkills(channel);
   let applied = false;
-  let degraded = false;
+  const failed: string[] = [];
   for (const skill of companions) {
     if (!materializeCompanionSkill(skill, projectRoot)) {
-      degraded = true;
+      failed.push(skill);
       p.log.warn(
         `Companion skill ${skill} is not in this checkout and could not be fetched from the ` +
           `${CHANNELS_BRANCH} branch. The ${channel} channel works, but the capability that ` +
@@ -134,7 +135,7 @@ async function applyCompanionSkills(
       applied = true;
       continue;
     }
-    degraded = true;
+    failed.push(skill);
     // Degraded, not fatal: the main channel install still works. Name the
     // skill and the exact re-apply command so the warning is actionable.
     p.log.warn(
@@ -144,18 +145,28 @@ async function applyCompanionSkills(
     );
   }
 
-  if (!applied) return;
-  if (degraded) {
+  if (failed.length) {
     // A half-applied companion may have copied files and appended barrel
     // imports before failing its build or tests — restarting could boot that
     // state. The channel itself already works (its own restart ran before the
     // companions), so hold the deferred restart until the operator repairs.
-    p.log.warn(
-      'Skipping the deferred service restart: a companion skill did not fully apply. ' +
-        'Re-apply it with the command above, then restart: bash setup/lib/restart.sh',
+    if (applied) {
+      p.log.warn(
+        'Skipping the deferred service restart: a companion skill did not fully apply. ' +
+          'Re-apply it with the command above, then restart: bash setup/lib/restart.sh',
+      );
+    }
+    await offerClaudeOnFailure(
+      {
+        stepName: `${channel}-companion-skills`,
+        msg: `Couldn't fully apply companion skill${failed.length === 1 ? '' : 's'} ${failed.join(', ')}.`,
+        hint: 'See logs/setup-steps/ for details, then use the re-apply command shown above.',
+      },
+      projectRoot,
     );
     return;
   }
+  if (!applied) return;
   try {
     await (overrides.exec ?? hostExec(projectRoot))('bash setup/lib/restart.sh');
   } catch {

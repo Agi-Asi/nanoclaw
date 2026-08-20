@@ -15,50 +15,33 @@ Adds Emacs support via a local HTTP bridge. Works with Doom Emacs, Spacemacs, an
 - **Draft writing** — send org prose; receive revisions or continuations in place
 - **Research capture** — ask a question directly in your org notes; the answer lands exactly where you need it
 
-## Install
+## Apply
 
 NanoClaw doesn't ship channels in trunk. This skill copies the Emacs adapter and the Lisp client in from the `channels` branch. Native HTTP bridge — no Chat SDK, no adapter package.
 
-### Pre-flight (idempotent)
+The mechanical steps use the deterministic skill engine and are safe to re-run.
 
-Skip to **Enable** if all of these are already in place:
+### 1. Copy the adapter and Lisp client
 
-- `src/channels/emacs.ts` exists
-- `src/channels/emacs.test.ts` exists
-- `src/channels/emacs-registration.test.ts` exists
-- `emacs/nanoclaw.el` exists
-- `src/channels/index.ts` contains `import './emacs.js';`
-
-Otherwise continue. Every step below is safe to re-run.
-
-### 1. Fetch the channels branch
-
-```bash
-git fetch origin channels
-```
-
-### 2. Copy the adapter and Lisp client
-
-```bash
-mkdir -p emacs
-git show origin/channels:src/channels/emacs.ts                    > src/channels/emacs.ts
-git show origin/channels:src/channels/emacs.test.ts              > src/channels/emacs.test.ts
-git show origin/channels:src/channels/emacs-registration.test.ts > src/channels/emacs-registration.test.ts
-git show origin/channels:emacs/nanoclaw.el                        > emacs/nanoclaw.el
+```nc:copy from-branch:channels
+src/channels/emacs.ts
+src/channels/emacs.test.ts
+src/channels/emacs-registration.test.ts
+emacs/nanoclaw.el
 ```
 
 ### 3. Append the self-registration import
 
-Append to `src/channels/index.ts` (skip if the line is already present):
-
-```typescript
+```nc:append to:src/channels/index.ts
 import './emacs.js';
 ```
 
 ### 4. Build and validate
 
-```bash
+```nc:run effect:build
 pnpm run build
+```
+```nc:run effect:test
 pnpm exec vitest run src/channels/emacs-registration.test.ts
 ```
 

@@ -461,8 +461,6 @@ interface FlowArgs {
   /** Extra sink for the pending-install line — the finish script prints it to
    *  the operator's terminal, which has no Slack conversation to post into. */
   onInstallPending?: (text: string) => void;
-  /** Template ref the agent was stamped from — broker attribution only. */
-  template?: string;
 }
 
 async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
@@ -505,7 +503,6 @@ async function runFlow(args: FlowArgs): Promise<OrchestrateSuccess> {
     description: args.description,
     allowGuests: args.allowGuests,
     requestedBy: operatorUserId,
-    template: args.template,
     installWait: args.installWait ?? resolveInstallWait(rootDir),
     onInstallPending: async (info) => {
       const text = installPendingText(displayName, info);
@@ -694,7 +691,6 @@ export async function runSlackAgentFlow(args: {
     allowGuests: content.allow_guests === true,
     originSession: session,
     room: content.room === 'none' ? 'none' : 'own',
-    template: typeof content.template === 'string' && content.template ? content.template : undefined,
   });
 }
 

@@ -97,7 +97,7 @@ vi.mock('../approvals/index.js', async () => {
 // Registers the wrapped create_agent delivery action — the path under test.
 // Deliberately NOT src/modules/index.ts: the upstream a2a barrel stays unloaded.
 import './index.js';
-import { ensureAgentRoom, finishSlackAgentFlow, runSlackAgentFlow } from './orchestrate.js';
+import { ensureAgentRoom, finishSlackAgentFlow } from './orchestrate.js';
 import { SlackFlowError } from './types.js';
 import { getDeliveryAction } from '../../delivery.js';
 import { log } from '../../log.js';
@@ -450,52 +450,6 @@ describe('slack-aware create_agent — manifest variants', () => {
     await runCreateAgent({ name: 'Research', instructions: 'dig deep' });
     const appBody = JSON.parse(fetchCalls.find((c) => c.url.endsWith('/v1/apps'))!.body) as Record<string, unknown>;
     expect(appBody.allow_guests).toBeUndefined();
-  });
-});
-
-describe('slack-aware create_agent — template attribution', () => {
-  // The Slack leg is driven directly here: the upstream template branch of
-  // createAgent (host fetch + stamping) is trunk's, and this pins only the
-  // one thing this module owns — content.template reaching the broker.
-  it('a templated create sends the ref to the broker as attribution', async () => {
-    const now = new Date().toISOString();
-    await createAgentGroup({
-      id: 'ag-new',
-      name: 'Research',
-      folder: 'research',
-      agent_provider: null,
-      created_at: now,
-    });
-
-    await runSlackAgentFlow({
-      content: { name: 'Research', instructions: 'dig deep', template: 'sales/sdr', room: 'none' },
-      session: SLACK_SESSION,
-      newAgentGroupId: 'ag-new',
-      slug: 'research',
-    });
-
-    const appBody = JSON.parse(fetchCalls.find((c) => c.url.endsWith('/v1/apps'))!.body) as Record<string, unknown>;
-    expect(appBody.template).toBe('sales/sdr');
-  });
-
-  it('a plain create sends no template field', async () => {
-    await runCreateAgent({ name: 'Research', instructions: 'dig deep' });
-    const appBody = JSON.parse(fetchCalls.find((c) => c.url.endsWith('/v1/apps'))!.body) as Record<string, unknown>;
-    expect(appBody.template).toBeUndefined();
-  });
-
-  it('hold payload carries the template ref through to the approved replay (confined group)', async () => {
-    await updateContainerConfigScalars(SRC_GROUP, { cli_scope: 'group' });
-
-    await runCreateAgent({ name: 'Research', instructions: 'dig deep', template: 'sales/sdr' });
-
-    expect(await getAgentGroupByFolder('research')).toBeUndefined();
-    expect(mockRequestApproval).toHaveBeenCalledTimes(1);
-    const opts = mockRequestApproval.mock.calls[0]![0] as { payload: Record<string, unknown>; question: string };
-    expect(opts.payload).toMatchObject({ name: 'Research', template: 'sales/sdr' });
-    // Design merge condition: the Slack card (the only card this path shows)
-    // names the template and says fetch-vs-local, same sentence as trunk's.
-    expect(opts.question).toContain('It will be stamped from template "sales/sdr"');
   });
 });
 

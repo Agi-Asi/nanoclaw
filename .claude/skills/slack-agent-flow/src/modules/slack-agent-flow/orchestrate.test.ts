@@ -796,9 +796,9 @@ describe('slack-aware create_agent — workspace install approval', () => {
     expect(env()).toMatch(/^SLACK_BOT_TOKEN_RESEARCH=/m);
     expect(env()).toMatch(/^SLACK_INSTANCES=.*research/m);
     expect(fakeDeps.startChannelAdapter).toHaveBeenCalledWith('slack-research');
-    const newGroup = getAgentGroupByFolder('research')!;
-    const dmMg = getMessagingGroupByPlatform('slack', 'slack:D0NEWDM', 'slack-research');
-    expect(getMessagingGroupAgentByPair(dmMg!.id, newGroup.id)).toBeDefined();
+    const newGroup = (await getAgentGroupByFolder('research'))!;
+    const dmMg = await getMessagingGroupByPlatform('slack', 'slack:D0NEWDM', 'slack-research');
+    expect(await getMessagingGroupAgentByPair(dmMg!.id, newGroup.id)).toBeDefined();
     expect(postedTexts().some((t) => t.includes("I'm Research, your new agent"))).toBe(true);
 
     // Exactly one app, and the consumed install link is retired.
@@ -837,7 +837,7 @@ describe('slack-aware create_agent — workspace install approval', () => {
     refuseAutoInstall();
     appStateQueue = [{ status: 'pending_install' }];
     await runCreateAgent({ name: 'Research' });
-    const groupCountAfterPark = getAgentGroupByFolder('research')!.id;
+    const groupCountAfterPark = (await getAgentGroupByFolder('research'))!.id;
     const postsAfterPark = postedTexts().length;
 
     // The operator approves the install, then asks for the same agent again.
@@ -847,8 +847,8 @@ describe('slack-aware create_agent — workspace install approval', () => {
 
     // One Slack app, one agent group — the second ask finished the first.
     expect(fetchCalls.filter((c) => c.url.endsWith('/v1/apps'))).toHaveLength(1);
-    expect(getAgentGroupByFolder('research')!.id).toBe(groupCountAfterPark);
-    expect(getAgentGroupByFolder('research-2')).toBeUndefined();
+    expect((await getAgentGroupByFolder('research'))!.id).toBe(groupCountAfterPark);
+    expect(await getAgentGroupByFolder('research-2')).toBeUndefined();
     // Upstream's name-collision answer must not be what the user hears.
     expect(notifyTexts().at(-1)).not.toContain('already have a destination');
     expect(notifyTexts().at(-1)).toContain('is live on Slack');
@@ -858,7 +858,7 @@ describe('slack-aware create_agent — workspace install approval', () => {
     expect(appStateReads).toBe(1);
     expect(postedTexts()[postsAfterPark]).toContain('Still waiting on your workspace');
     expect(env()).toMatch(/^SLACK_BOT_TOKEN_RESEARCH=/m);
-    expect(getMessagingGroupByPlatform('slack', 'slack:D0NEWDM', 'slack-research')).toBeDefined();
+    expect(await getMessagingGroupByPlatform('slack', 'slack:D0NEWDM', 'slack-research')).toBeDefined();
   });
 
   it('SLACK_INSTALL_WAIT_MS=0 parks immediately — a slow approval queue need not hold delivery open', async () => {

@@ -66,9 +66,9 @@ const EXPECTED_PROMPTS = [
 interface TestMsg {
   id: string;
   kind: string;
-  platform_id: string | null;
-  channel_type: string | null;
-  thread_id: string | null;
+  platformId: string | null;
+  channelType: string | null;
+  threadId: string | null;
   content: string;
 }
 
@@ -76,9 +76,9 @@ function welcomeMsg(overrides: Partial<TestMsg> = {}): TestMsg {
   return {
     id: 'out-1',
     kind: 'chat',
-    platform_id: 'slack:D1',
-    channel_type: 'slack',
-    thread_id: 'slack:D1:',
+    platformId: 'slack:D1',
+    channelType: 'slack',
+    threadId: 'slack:D1:',
     content: JSON.stringify({ text: 'Welcome!' }),
     ...overrides,
   };
@@ -160,11 +160,11 @@ describe('welcome prompts on first delivery (post-delivery hook)', () => {
     expect(registry.setSuggestedPrompts.mock.calls).toEqual([['slack', 'slack:D1', EXPECTED_PROMPTS, 'Get started']]);
   });
 
-  it('a threadless welcome row (thread_id null) also counts as the welcome', async () => {
+  it('a threadless welcome row also counts as the welcome', async () => {
     const { postDelivery, registry, getMessagingGroupByPlatform } = await loadModule();
     getMessagingGroupByPlatform.mockReturnValue(dmMg());
 
-    postDelivery(welcomeMsg({ thread_id: null }), { id: 'sess-1' }, { firstDelivery: true });
+    postDelivery(welcomeMsg({ threadId: null }), { id: 'sess-1' }, { firstDelivery: true });
 
     await flush();
     expect(registry.setSuggestedPrompts).toHaveBeenCalledTimes(1);
@@ -184,7 +184,7 @@ describe('welcome prompts on first delivery (post-delivery hook)', () => {
     const { postDelivery, registry, getMessagingGroupByPlatform } = await loadModule();
     getMessagingGroupByPlatform.mockReturnValue(dmMg());
 
-    postDelivery(welcomeMsg({ thread_id: 'slack:D1:171' }), { id: 'sess-1' }, { firstDelivery: true });
+    postDelivery(welcomeMsg({ threadId: 'slack:D1:171' }), { id: 'sess-1' }, { firstDelivery: true });
 
     await flush();
     expect(registry.setSuggestedPrompts).not.toHaveBeenCalled();
@@ -206,8 +206,8 @@ describe('welcome prompts on first delivery (post-delivery hook)', () => {
   it('no-op when the row has no channel/platform address', async () => {
     const { postDelivery, registry, getMessagingGroupByPlatform } = await loadModule();
 
-    postDelivery(welcomeMsg({ channel_type: null }), { id: 'sess-1' }, { firstDelivery: true });
-    postDelivery(welcomeMsg({ platform_id: null }), { id: 'sess-1' }, { firstDelivery: true });
+    postDelivery(welcomeMsg({ channelType: null }), { id: 'sess-1' }, { firstDelivery: true });
+    postDelivery(welcomeMsg({ platformId: null }), { id: 'sess-1' }, { firstDelivery: true });
 
     await flush();
     expect(getMessagingGroupByPlatform).not.toHaveBeenCalled();

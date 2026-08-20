@@ -57,15 +57,15 @@ test -f src/channels/slack.ts && test -f src/channels/slack-lib.ts && test -f sr
 ### 2. Check the trunk extension seams
 
 Everything this flow plugs into is standard trunk API — the adapter hot-start
-entry, the delivery batch preview, the create-agent notify option, the
-decline-and-notify overrides, the container tool-extension hook, and the setup
-wizard's channel registries. This is a trunk **version requirement, not an
-edit**: if the check below fails, the NanoClaw trunk is too old for this skill
-— bring the install up to date (`/update-nanoclaw`) instead of patching any of
-these files by hand:
+entry, the delivery batch preview, the mailbox delivery/session helpers, the
+create-agent notify option, the decline-and-notify overrides, the container
+tool-extension hook, and the setup wizard's channel registries. This is a
+trunk **version requirement, not an edit**: if the check below fails, the
+NanoClaw trunk is too old for this skill — bring the install up to date
+(`/update-nanoclaw`) instead of patching any of these files by hand:
 
 ```nc:run effect:check
-grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "dedupeKey?: string" src/modules/permissions/sender-approval.ts && grep -q "declineText?: string" src/modules/permissions/sender-approval.ts && grep -q "fyiText?: string" src/modules/permissions/sender-approval.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/claude-md-compose.ts && grep -q "await action.decide" src/guard/guard.ts
+grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "session: Session) => Promise<void>" src/delivery.ts && grep -q "trigger?: boolean" src/session-manager.ts && grep -q "findCliResponse" container/agent-runner/src/db/messages-in.ts && grep -q "Promise<number>" container/agent-runner/src/db/messages-out.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "dedupeKey?: string" src/modules/permissions/sender-approval.ts && grep -q "declineText?: string" src/modules/permissions/sender-approval.ts && grep -q "fyiText?: string" src/modules/permissions/sender-approval.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/claude-md-compose.ts && grep -q "await action.decide" src/guard/guard.ts
 ```
 
 The last term requires an async-capable guard seam: the flow's `create_agent`
@@ -273,6 +273,7 @@ bash setup/lib/restart.sh
   It runs outside the host process, so it cannot hot-start the adapter:
   `--restart` runs `bash setup/lib/restart.sh` for you, otherwise it prints
   the restart instruction.
+
 - **Setup-wizard leg.** On a trunk new enough for step 2's check, running
   `bash nanoclaw.sh --slack-agents` does the whole install: the flag registers
   the managed-provisioning pre-step and the companion list

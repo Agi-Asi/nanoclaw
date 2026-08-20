@@ -222,7 +222,7 @@ function notifyTexts(): string[] {
 async function runCreateAgent(content: Record<string, unknown>, session: Session = SLACK_SESSION): Promise<void> {
   const wrapped = getDeliveryAction('create_agent');
   expect(wrapped).toBeDefined();
-  await wrapped!(content, session, undefined as never);
+  await wrapped!(content, session);
 }
 
 function assertNoTokenLeak(): void {

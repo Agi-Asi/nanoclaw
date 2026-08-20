@@ -8,7 +8,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
-import { initTestSessionDb, closeSessionDb, getOutboundDb } from '../db/connection.js';
+import { initTestSessionDb, closeSessionDb, getOutboundDb } from '../mailbox/sqlite/connection.js';
 import { createAgent } from './agents.js';
 import { addToRoom, createRoom } from './rooms.js';
 

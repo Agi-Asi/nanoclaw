@@ -143,9 +143,9 @@ describe('wiki standing instructions', () => {
   });
 
   it('are destroyed when written into the generated group CLAUDE.md', async () => {
-    // This is the case the skill used to document. `CLAUDE.md` is regenerated
-    // on every spawn, so a marker block there never reaches the agent — which
-    // is exactly why Step 4c targets the standing-instructions file instead.
+    // The negative control for the seam above: `CLAUDE.md` is regenerated on
+    // every spawn, so a marker block there never reaches the agent — which is
+    // exactly why Step 4c targets the standing-instructions file instead.
     const ag = group('ag-wiki-claudemd', 'wiki-claudemd');
     const dir = await seedGroup(ag);
     fs.writeFileSync(path.join(dir, 'CLAUDE.md'), `# Group\n\n${WIKI_SECTION}\n`);

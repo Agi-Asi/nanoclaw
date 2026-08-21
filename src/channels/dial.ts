@@ -99,6 +99,26 @@ const SEND_TIMEOUT_MS = 30_000;
 /** Dedup window — the listen daemon retries a failed handler invocation once. */
 const DEDUP_TTL_MS = 5 * 60_000;
 
+/**
+ * Outbound delivery verdicts. `dial message` returns as soon as Dial ACCEPTS a
+ * message; the carrier's verdict comes later as a `message.status_changed`
+ * event (https://docs.getdial.ai/api-reference/events/message-status-changed).
+ * The listen stream is presence-based and replays at most ~2 minutes of missed
+ * events, so every send is also tracked here and, once it has gone quiet for
+ * STATUS_GRACE_MS without a verdict, read back through `dial message list`.
+ */
+const STATUS_GRACE_MS = 3 * 60_000;
+/** Stop tracking a send that never got a verdict; carriers settle well inside this. */
+const STATUS_TRACK_TTL_MS = 24 * 60 * 60_000;
+const STATUS_RECONCILE_INTERVAL_MS = 60_000;
+
+interface TrackedSend {
+  to: string;
+  from: string;
+  /** Epoch ms of the send. */
+  at: number;
+}
+
 /** Dial listen-daemon event envelope (the subset we consume). */
 interface DialEventEnvelope {
   id?: string;
@@ -213,6 +233,45 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
   let draining = false;
   const seen = new Map<string, number>();
 
+  // Sends awaiting a carrier verdict, keyed by Dial message id. Persisted so a
+  // host restart does not turn an undelivered reply into a silent one.
+  const pendingPath = path.join(DATA_DIR, 'dial', 'pending-sends.json');
+  const pending = new Map<string, TrackedSend>();
+  let reconcileTimer: ReturnType<typeof setInterval> | null = null;
+  let reconciling = false;
+
+  function loadPending(): void {
+    try {
+      const raw = JSON.parse(fs.readFileSync(pendingPath, 'utf8')) as Record<string, TrackedSend>;
+      for (const [id, t] of Object.entries(raw)) {
+        if (t && typeof t.at === 'number')
+          pending.set(id, { to: String(t.to ?? ''), from: String(t.from ?? ''), at: t.at });
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') log.warn('Dial: could not read pending sends', { err });
+    }
+  }
+
+  function savePending(): void {
+    try {
+      fs.mkdirSync(path.dirname(pendingPath), { recursive: true });
+      const tmp = `${pendingPath}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(Object.fromEntries(pending)));
+      fs.renameSync(tmp, pendingPath);
+    } catch (err) {
+      log.warn('Dial: could not persist pending sends', { err });
+    }
+  }
+
+  function trackSend(id: string, to: string, from: string): void {
+    pending.set(id, { to, from, at: Date.now() });
+    savePending();
+  }
+
+  function untrack(id: string): void {
+    if (pending.delete(id)) savePending();
+  }
+
   function seenBefore(id: string): boolean {
     const now = Date.now();
     for (const [k, ts] of seen) if (now - ts > DEDUP_TTL_MS) seen.delete(k);
@@ -233,6 +292,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
         body: chunk,
         ...(fromNumber ? { fromNumber } : {}),
       });
+      if (sentId) trackSend(sentId, to, fromNumber || '');
       lastId = sentId ?? lastId;
     }
     return lastId;
@@ -321,7 +381,138 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     }
   }
 
-  /** Route one inbound event — SMS text and ended-call notifications. */
+  /**
+   * Apply one outbound delivery verdict, from a `message.status_changed` event
+   * or from a reconcile read-back. Only the delivery axis matters: Dial reports
+   * reads on a separate axis that SMS never populates. `pending` and
+   * `unconfirmed` are not verdicts, so the send stays tracked.
+   */
+  async function applyDeliveryStatus(data: Record<string, unknown>, at?: string): Promise<void> {
+    if (data.changed !== undefined && data.changed !== 'delivery') return;
+    const messageId = typeof data.messageId === 'string' ? data.messageId : '';
+    if (!messageId) return;
+    const state = typeof data.deliveryState === 'string' ? data.deliveryState : '';
+    const tracked = pending.get(messageId);
+    const to = (typeof data.to === 'string' && data.to) || tracked?.to || '';
+    const from = (typeof data.from === 'string' && data.from) || tracked?.from || '';
+
+    if (state === 'delivered') {
+      untrack(messageId);
+      log.info('Dial: outbound SMS delivered', { messageId, to });
+      return;
+    }
+    if (state !== 'undelivered' && state !== 'failed') return;
+
+    untrack(messageId);
+    const reason =
+      typeof data.deliveryError === 'string' && data.deliveryError ? data.deliveryError : 'The carrier gave no reason.';
+    log.error('Dial: outbound SMS was not delivered', { messageId, to, from, state, reason });
+    await notifyDeliveryFailure({ messageId, to, from, state, reason, at });
+  }
+
+  /**
+   * Tell the agent that sent the message. The notice goes into the same line +
+   * thread the reply went out on, attributed to the correspondent (the thread's
+   * known sender, so it passes the line's sender policy) and framed as a
+   * bracketed system notice like an ended-call report. It deliberately does NOT
+   * go back out over SMS: that is the route that just failed.
+   */
+  async function notifyDeliveryFailure(f: {
+    messageId: string;
+    to: string;
+    from: string;
+    state: string;
+    reason: string;
+    at?: string;
+  }): Promise<void> {
+    if (!setup || !f.to) return;
+    const activeLine = f.from || (await line());
+    const platformId = activeLine || f.to;
+    const threadId = activeLine ? f.to : null;
+    const text = `[Delivery failure: your SMS to ${f.to} was not delivered (${f.state}). ${f.reason} Assume ${f.to} did not receive your last message.]`;
+    const msg: InboundMessage = {
+      id: `${f.messageId}:delivery`,
+      kind: 'chat',
+      content: { text, sender: f.to, senderId: `dial:${f.to}`, senderName: f.to },
+      isMention: true,
+      isGroup: true,
+      timestamp: f.at || new Date().toISOString(),
+    };
+    try {
+      await setup.onInbound(platformId, threadId, msg);
+    } catch (err) {
+      log.error('Dial: could not route the delivery failure to the agent', { messageId: f.messageId, err });
+    }
+  }
+
+  /**
+   * Safety net for verdicts the event stream did not deliver (daemon down past
+   * its ~2-minute replay window, host restart). Reads back every outbound
+   * message since the oldest quiet send and applies any verdict it finds.
+   * Messages have no get-by-id endpoint, so this is list-and-match.
+   */
+  async function reconcilePending(): Promise<void> {
+    if (reconciling || !setup) return;
+    const now = Date.now();
+    const quiet: string[] = [];
+    let oldest = now;
+    let expired = false;
+    for (const [id, t] of pending) {
+      if (now - t.at > STATUS_TRACK_TTL_MS) {
+        pending.delete(id);
+        expired = true;
+        log.warn('Dial: no delivery verdict for an outbound SMS after 24h — no longer tracking it', {
+          messageId: id,
+          to: t.to,
+        });
+        continue;
+      }
+      if (now - t.at < STATUS_GRACE_MS) continue;
+      quiet.push(id);
+      if (t.at < oldest) oldest = t.at;
+    }
+    if (expired) savePending();
+    if (quiet.length === 0) return;
+
+    reconciling = true;
+    try {
+      const since = new Date(oldest - 60_000).toISOString();
+      const { stdout } = await execFileAsync(
+        config.cliPath,
+        ['message', 'list', '--json', '--direction', 'outbound', '--since', since],
+        { encoding: 'utf8', timeout: SEND_TIMEOUT_MS, env: cliEnvFor(config.cliPath) },
+      );
+      const parsed = JSON.parse(stdout) as { ok?: boolean; messages?: Array<Record<string, unknown>> };
+      if (!parsed.ok || !Array.isArray(parsed.messages)) {
+        throw new Error(`unexpected \`dial message list\` output: ${stdout.trim().slice(0, 200)}`);
+      }
+      const wanted = new Set(quiet);
+      for (const row of parsed.messages) {
+        const id = typeof row.id === 'string' ? row.id : '';
+        if (!wanted.has(id)) continue;
+        // `deliveryState`/`deliveryError` is the current shape; `status`/
+        // `statusError` are the older aliases the API still returns.
+        const state =
+          typeof row.deliveryState === 'string' ? row.deliveryState : typeof row.status === 'string' ? row.status : '';
+        const error =
+          typeof row.deliveryError === 'string'
+            ? row.deliveryError
+            : typeof row.statusError === 'string'
+              ? row.statusError
+              : undefined;
+        await applyDeliveryStatus(
+          { messageId: id, deliveryState: state, deliveryError: error, to: row.to, from: row.from },
+          typeof row.createdAt === 'string' ? row.createdAt : undefined,
+        );
+      }
+    } catch (err) {
+      log.warn('Dial: could not reconcile outbound delivery status', { pending: quiet.length, err });
+    } finally {
+      reconciling = false;
+    }
+  }
+
+  /** Route one inbound event — SMS text, ended-call notifications, outbound delivery verdicts. */
   async function routeEvent(env: DialEventEnvelope): Promise<void> {
     if (!setup) return;
     if (env.id && seenBefore(env.id)) return;
@@ -365,6 +556,9 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
         data.transcriptAvailable && callId ? ` Run \`dial call get ${callId}\` for the transcript.` : '';
       const to = outbound && callee ? ` to ${callee}` : '';
       text = `[Voice call ${outbound ? 'outbound' : 'inbound'}${to} ${data.status ?? 'ended'}${data.canceled ? ' (canceled)' : ''}${dur}.${transcript}]`;
+    } else if (env.type === 'message.status_changed') {
+      await applyDeliveryStatus(data, env.createdAt);
+      return;
     } else {
       return;
     }
@@ -508,6 +702,9 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       const commandTarget = ensureCommandTarget() ? 'ok' : 'unverified';
 
       drainSpool(); // anything spooled while we were down
+      loadPending();
+      void reconcilePending(); // verdicts that landed while we were down
+      reconcileTimer = setInterval(() => void reconcilePending(), STATUS_RECONCILE_INTERVAL_MS);
       try {
         watcher = fs.watch(spoolDir, () => drainSpool());
       } catch (err) {
@@ -525,6 +722,8 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       watcher = null;
       if (pollTimer) clearInterval(pollTimer);
       pollTimer = null;
+      if (reconcileTimer) clearInterval(reconcileTimer);
+      reconcileTimer = null;
       log.info('Dial channel disconnected');
     },
 

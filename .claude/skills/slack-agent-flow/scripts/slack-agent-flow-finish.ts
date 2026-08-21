@@ -134,6 +134,13 @@ async function main(): Promise<void> {
     rootDir: root,
     allowGuests: args.allowGuests,
     room: args.room,
+    // A workspace install approval can hold this for minutes; say so rather
+    // than letting the script look hung.
+    onInstallPending: (text) => {
+      console.log('');
+      console.log(text);
+      console.log('Waiting…');
+    },
   });
 
   console.log('');

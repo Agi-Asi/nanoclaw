@@ -13,25 +13,23 @@
  *
  * - `canvas_read` outcomes are `kind:'system'` rows carrying `requestId`;
  *   the container tool polls inbound.db for exactly that row and consumes
- *   it. They are trigger=0 always (the requester is already polling) and
+ *   it. They never trigger a wake (the requester is already polling) and
  *   the poll loop deliberately filters system rows out of agent prompts.
  * - `canvas_edit` outcomes are `kind:'chat'` system notes (sender
  *   'system', channelType 'agent') — the membership-note shape. NOT
  *   `kind:'system'`: nothing polls for them, and the poll loop would
  *   filter them out of every batch, so the agent would never learn an
- *   edit failed (and an unconsumed trigger=1 system row keeps the session
+ *   edit failed (and an unconsumed triggering system row keeps the session
  *   permanently "due" for the host sweep — wake churn). As chat rows they
- *   render like any message: successes are trigger=0 (ambient, next
- *   wake); FAILURES are trigger=1 so the agent wakes to correct course —
+ *   render like any message: successes are non-triggering (ambient, next
+ *   wake); failures trigger so the agent wakes to correct course —
  *   it already told the user the edit was submitted.
  */
-import type Database from 'better-sqlite3';
-
 import { botTokenKeyForInstance } from '../../channels/slack-lib.js';
 import { getMessagingGroup } from '../../db/messaging-groups.js';
-import { insertMessage } from '../../db/session-db.js';
 import { readEnvValue } from '../../env-file.js';
 import { log } from '../../log.js';
+import { writeSessionMessage } from '../../session-manager.js';
 import type { Session } from '../../types.js';
 import {
   editCanvas,
@@ -95,16 +93,16 @@ function readBackHeadings(text: string): Set<string> {
 }
 
 /** canvas_read outcome — a system row the container tool polls for by requestId. */
-function writeCanvasResponse(
-  inDb: Database.Database,
+async function writeCanvasResponse(
+  session: Session,
   args: {
     requestId: string;
     action: 'canvas_read';
     status: 'ok' | 'error';
     result: Record<string, unknown>;
   },
-): void {
-  insertMessage(inDb, {
+): Promise<void> {
+  await writeSessionMessage(session.agent_group_id, session.id, {
     id: `canvas-resp-${args.requestId}`,
     kind: 'system',
     timestamp: new Date().toISOString(),
@@ -120,17 +118,20 @@ function writeCanvasResponse(
     }),
     processAfter: null,
     recurrence: null,
-    trigger: 0,
+    trigger: false,
   });
 }
 
 /**
  * canvas_edit outcome — a renderable chat note (membership-note shape).
- * trigger=1 failures wake the agent with the reason; trigger=0 successes
+ * Triggering failures wake the agent with the reason; non-triggering successes
  * ride along as ambient context on the next wake.
  */
-function writeCanvasEditNote(inDb: Database.Database, args: { requestId: string; text: string; trigger: 0 | 1 }): void {
-  insertMessage(inDb, {
+async function writeCanvasEditNote(
+  session: Session,
+  args: { requestId: string; text: string; trigger: boolean },
+): Promise<void> {
+  await writeSessionMessage(session.agent_group_id, session.id, {
     id: `canvas-resp-${args.requestId}`,
     kind: 'chat',
     timestamp: new Date().toISOString(),
@@ -144,11 +145,7 @@ function writeCanvasEditNote(inDb: Database.Database, args: { requestId: string;
   });
 }
 
-export async function handleCanvasEdit(
-  content: Record<string, unknown>,
-  session: Session,
-  inDb: Database.Database,
-): Promise<void> {
+export async function handleCanvasEdit(content: Record<string, unknown>, session: Session): Promise<void> {
   const requestId =
     typeof content.requestId === 'string' && content.requestId ? content.requestId : `canvas-${Date.now()}`;
   const canvasId = typeof content.canvas_id === 'string' ? content.canvas_id : '';
@@ -159,36 +156,36 @@ export async function handleCanvasEdit(
   const editLabel = `${typeof op === 'string' && op ? op : 'canvas_edit'}${
     canvasId ? ` on canvas ${canvasId}` : ''
   }${sectionText ? `, section "${sectionText}"` : ''}`;
-  const fail = (message: string): void => {
+  const fail = async (message: string): Promise<void> => {
     log.warn('canvas_edit failed', { sessionId: session.id, requestId, error: message });
-    writeCanvasEditNote(inDb, {
+    await writeCanvasEditNote(session, {
       requestId,
       text: `Canvas edit FAILED (${editLabel}): ${message}`,
-      trigger: 1,
+      trigger: true,
     });
   };
-  const succeed = (note?: string): void => {
-    writeCanvasEditNote(inDb, {
+  const succeed = async (note?: string): Promise<void> => {
+    await writeCanvasEditNote(session, {
       requestId,
       text: `Canvas edit applied (${editLabel}).${note ? ` ${note}` : ''}`,
-      trigger: 0,
+      trigger: false,
     });
   };
 
   if (!canvasId || !markdown || !CANVAS_EDIT_OPS.includes(op)) {
-    fail(`canvas_edit needs canvas_id, markdown, and op (one of ${CANVAS_EDIT_OPS.join(', ')})`);
+    await fail(`canvas_edit needs canvas_id, markdown, and op (one of ${CANVAS_EDIT_OPS.join(', ')})`);
     return;
   }
   if (op !== 'append' && !sectionText) {
     // The safe-op invariant: a section-targeted op without lookup criteria
     // can never fall through to an unsectioned (whole-doc) replace.
-    fail(`${op} requires section_text (text the target section contains)`);
+    await fail(`${op} requires section_text (text the target section contains)`);
     return;
   }
 
   const auth = await resolveSessionBotToken(session);
   if ('error' in auth) {
-    fail(auth.error);
+    await fail(auth.error);
     return;
   }
 
@@ -211,7 +208,7 @@ export async function handleCanvasEdit(
   if (op !== 'replace_section' && html) {
     const newHeading = firstMarkdownHeading(markdown);
     if (newHeading && readBackHeadings(htmlToReadableText(html)).has(newHeading.toLowerCase())) {
-      fail(
+      await fail(
         `${op} refused: the canvas already has a "${newHeading}" section — inserting would create a duplicate heading. Use replace_section with section_text "${newHeading}" to update that section instead.`,
       );
       return;
@@ -221,7 +218,7 @@ export async function handleCanvasEdit(
   // Live-probed platform limit: canvases.edit markdown IGNORES `- [x]` —
   // every path (insert, section replace, item replace) lands unticked, so
   // tick state is UI-only and a checklist rewrite RESETS it. Landing the
-  // edit and hiding that would be a silent lie; the note is trigger=1 so
+  // edit and hiding that would be a silent lie; the note triggers so
   // the agent can adjust (item-level edits preserve ticks).
   const tickWarnings: string[] = [];
   if (/^\s*[-*]\s+\[[xX]\]\s/m.test(markdown)) {
@@ -229,15 +226,15 @@ export async function handleCanvasEdit(
       'the [x] states in your markdown were NOT applied — the canvas API cannot set tick state; those items landed unticked',
     );
   }
-  const finish = (note?: string): void => {
+  const finish = async (note?: string): Promise<void> => {
     if (tickWarnings.length === 0) {
-      succeed(note);
+      await succeed(note);
       return;
     }
-    writeCanvasEditNote(inDb, {
+    await writeCanvasEditNote(session, {
       requestId,
       text: `Canvas edit applied (${editLabel}), BUT ${tickWarnings.join('; also ')}.${note ? ` ${note}` : ''} To preserve or mark checklist state, edit items individually (see the canvas-work skill) and leave ticking to humans.`,
-      trigger: 1,
+      trigger: true,
     });
   };
 
@@ -245,7 +242,7 @@ export async function handleCanvasEdit(
     if (op === 'append') {
       await editCanvas(auth.token, canvasId, { operation: 'insert_at_end', markdown });
       log.info('canvas_edit applied', { sessionId: session.id, requestId, canvasId, op });
-      finish();
+      await finish();
       return;
     }
 
@@ -275,7 +272,7 @@ export async function handleCanvasEdit(
           deleted++;
         }
       } catch (err) {
-        fail(
+        await fail(
           `replace_section partially applied: the new content is in place but ${region.bodyIds.length - deleted} old block(s) of the previous section remain below it — read the canvas and remove the leftovers. Underlying error: ${err instanceof Error ? err.message : String(err)}`,
         );
         return;
@@ -287,7 +284,7 @@ export async function handleCanvasEdit(
         op,
         blocksReplaced: region.bodyIds.length + 1,
       });
-      finish(
+      await finish(
         region.hasUnaddressableBlocks
           ? 'Note: some blocks in the old section could not be addressed and were left in place — re-read to verify.'
           : undefined,
@@ -300,7 +297,7 @@ export async function handleCanvasEdit(
       // heading — inserting right after the heading splits the section body.
       await editCanvas(auth.token, canvasId, { operation: 'insert_after', sectionId: region.lastId, markdown });
       log.info('canvas_edit applied', { sessionId: session.id, requestId, canvasId, op });
-      finish();
+      await finish();
       return;
     }
 
@@ -308,7 +305,7 @@ export async function handleCanvasEdit(
     // single-block behavior via sections.lookup, as before.
     const sectionId = await lookupCanvasSection(auth.token, canvasId, sectionText);
     if (!sectionId) {
-      fail(
+      await fail(
         `no section matching "${sectionText}" found in canvas ${canvasId} — re-read the canvas and retry with text the section actually contains`,
       );
       return;
@@ -320,44 +317,40 @@ export async function handleCanvasEdit(
     };
     await editCanvas(auth.token, canvasId, change);
     log.info('canvas_edit applied', { sessionId: session.id, requestId, canvasId, op });
-    finish();
+    await finish();
   } catch (err) {
-    fail(err instanceof Error ? err.message : String(err));
+    await fail(err instanceof Error ? err.message : String(err));
   }
 }
 
-export async function handleCanvasRead(
-  content: Record<string, unknown>,
-  session: Session,
-  inDb: Database.Database,
-): Promise<void> {
+export async function handleCanvasRead(content: Record<string, unknown>, session: Session): Promise<void> {
   const requestId =
     typeof content.requestId === 'string' && content.requestId ? content.requestId : `canvas-${Date.now()}`;
   // Reader responses never wake: the container tool is already polling for
   // this row (errors included — a wake would double-charge the outcome).
-  const respond = (status: 'ok' | 'error', result: Record<string, unknown>): void => {
-    writeCanvasResponse(inDb, { requestId, action: 'canvas_read', status, result });
+  const respond = (status: 'ok' | 'error', result: Record<string, unknown>): Promise<void> => {
+    return writeCanvasResponse(session, { requestId, action: 'canvas_read', status, result });
   };
 
   const canvasId = typeof content.canvas_id === 'string' ? content.canvas_id : '';
   if (!canvasId) {
-    respond('error', { error: 'canvas_read needs canvas_id' });
+    await respond('error', { error: 'canvas_read needs canvas_id' });
     return;
   }
 
   const auth = await resolveSessionBotToken(session);
   if ('error' in auth) {
-    respond('error', { error: auth.error });
+    await respond('error', { error: auth.error });
     return;
   }
 
   try {
     const text = await fetchCanvasText(auth.token, canvasId);
     log.info('canvas_read served', { sessionId: session.id, requestId, canvasId, chars: text.length });
-    respond('ok', { canvas_id: canvasId, text });
+    await respond('ok', { canvas_id: canvasId, text });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log.warn('canvas_read failed', { sessionId: session.id, requestId, error: message });
-    respond('error', { error: message });
+    await respond('error', { error: message });
   }
 }

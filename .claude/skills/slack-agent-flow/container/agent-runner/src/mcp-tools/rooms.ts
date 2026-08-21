@@ -43,7 +43,7 @@ export const createRoom: McpToolDefinition = {
   tool: {
     name: 'create_room',
     description:
-      'Open ONE shared Slack room (group conversation) with the user and several agents at once — the team primitive. Use after creating the agents (create_agent with room:\'none\' for teams): one room with ALL of them, never one room per agent. May require admin approval. Fire-and-forget: the call returns immediately; you will get a system note when the room is live, telling you how to post the intro there.',
+      "Open ONE shared Slack room (group conversation) with the user and several agents at once — the team primitive. Use after creating the agents (create_agent with room:'none' for teams): one room with ALL of them, never one room per agent. May require admin approval. Fire-and-forget: the call returns immediately; you will get a system note when the room is live, telling you how to post the intro there.",
     inputSchema: {
       type: 'object' as const,
       properties: {
@@ -74,7 +74,7 @@ export const createRoom: McpToolDefinition = {
     if (agents.length === 0) return err('agents must list at least one agent name');
 
     const requestId = generateId();
-    writeMessageOut({
+    await writeMessageOut({
       id: requestId,
       kind: 'system',
       content: JSON.stringify({
@@ -82,7 +82,9 @@ export const createRoom: McpToolDefinition = {
         requestId,
         name,
         agents,
-        ...(typeof args.purpose === 'string' && args.purpose.trim() ? { purpose: (args.purpose as string).trim() } : {}),
+        ...(typeof args.purpose === 'string' && args.purpose.trim()
+          ? { purpose: (args.purpose as string).trim() }
+          : {}),
         ...(args.include_me === false ? { include_me: false } : {}),
       }),
     });
@@ -113,7 +115,7 @@ export const addToRoom: McpToolDefinition = {
     if (!agent) return err('agent is required');
 
     const requestId = generateId();
-    writeMessageOut({
+    await writeMessageOut({
       id: requestId,
       kind: 'system',
       content: JSON.stringify({ action: 'add_to_room', requestId, room, agent }),

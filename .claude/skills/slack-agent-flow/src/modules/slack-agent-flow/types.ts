@@ -13,6 +13,8 @@ export type SlackFlowStep =
   | 'no-credentials'
   | 'broker'
   | 'direct-create'
+  /** Waiting out a workspace install approval before the bot token exists. */
+  | 'install-wait'
   | 'env-write'
   | 'adapter-start'
   | 'dm-open'
@@ -67,6 +69,15 @@ export interface ProvisionInput {
   parentAppId?: string;
   /** Template name, when the agent was stamped from one. */
   template?: string;
+  /**
+   * Called once when the workspace has not approved the app's install and the
+   * flow is about to wait for it — `resumed` distinguishes a fresh refusal
+   * from picking a parked app back up. Exceptions are swallowed: telling the
+   * human is best-effort, the wait happens either way.
+   */
+  onInstallPending?: (info: { appId: string; installUrl?: string; resumed: boolean }) => void | Promise<void>;
+  /** Wait budget for a deferred install. Tests shorten it; callers rarely set it. */
+  installWait?: { intervalMs?: number; timeoutMs?: number };
 }
 
 export interface ProvisionResult {
@@ -78,6 +89,12 @@ export interface ProvisionResult {
   appId: string;
   /** True when tokens were already in .env and no provisioning call was made. */
   reused: boolean;
+  /**
+   * True when the bot token arrived only after waiting out a workspace install
+   * approval (auto-install was refused). Everything downstream is identical —
+   * the flag exists so the completion message can say what happened.
+   */
+  deferredInstall?: boolean;
 }
 
 export interface OrchestrateSuccess {
@@ -87,4 +104,6 @@ export interface OrchestrateSuccess {
   dmChannelId: string;
   /** Absent when the create ran with room:'none' — no shared room. */
   roomChannelId?: string;
+  /** True when the bot only came online after a workspace install approval. */
+  deferredInstall?: boolean;
 }

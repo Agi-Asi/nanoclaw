@@ -24,10 +24,10 @@
 import { setSuggestedPrompts, setThreadTitle } from '../../channels/channel-registry.js';
 import { setAgentDmOpenedHandler } from '../../channels/chat-sdk-bridge.js';
 import { getMessagingGroupByPlatform } from '../../db/messaging-groups.js';
-import type { OutboundMessage } from '../../db/session-db.js';
 import { getActiveSessions } from '../../db/sessions.js';
 import { registerPostDeliveryHook } from '../../delivery.js';
 import { log } from '../../log.js';
+import type { OutboundMessage } from '../../mailbox/index.js';
 import { registerSessionCreatedHook } from '../../router.js';
 
 /**
@@ -100,10 +100,10 @@ setAgentDmOpenedHandler(async ({ channelId }) => {
 
 async function offerWelcomePrompts(msg: OutboundMessage): Promise<void> {
   try {
-    const channelType = msg.channel_type;
-    const platformId = msg.platform_id;
+    const channelType = msg.channelType;
+    const platformId = msg.platformId;
     if (!channelType || !platformId) return;
-    const tidParts = (msg.thread_id ?? '').split(':');
+    const tidParts = (msg.threadId ?? '').split(':');
     if (tidParts.length >= 3 && tidParts[tidParts.length - 1] !== '') return; // threaded → not the welcome
     const mg = await getMessagingGroupByPlatform(channelType, platformId);
     if (!mg || mg.is_group !== 0) return;

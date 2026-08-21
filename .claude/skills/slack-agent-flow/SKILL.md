@@ -57,15 +57,15 @@ test -f src/channels/slack.ts && test -f src/channels/slack-lib.ts && test -f sr
 ### 2. Check the trunk extension seams
 
 Everything this flow plugs into is standard trunk API — the adapter hot-start
-entry, the delivery batch preview, the create-agent notify option, the
-decline-and-notify overrides, the container tool-extension hook, and the setup
-wizard's channel registries. This is a trunk **version requirement, not an
-edit**: if the check below fails, the NanoClaw trunk is too old for this skill
-— bring the install up to date (`/update-nanoclaw`) instead of patching any of
-these files by hand:
+entry, the delivery batch preview, the mailbox delivery/session helpers, the
+create-agent notify option, the decline-and-notify overrides, the container
+tool-extension hook, and the setup wizard's channel registries. This is a
+trunk **version requirement, not an edit**: if the check below fails, the
+NanoClaw trunk is too old for this skill — bring the install up to date
+(`/update-nanoclaw`) instead of patching any of these files by hand:
 
 ```nc:run effect:check
-grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "dedupeKey?: string" src/modules/permissions/sender-approval.ts && grep -q "declineText?: string" src/modules/permissions/sender-approval.ts && grep -q "fyiText?: string" src/modules/permissions/sender-approval.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/claude-md-compose.ts && grep -q "await action.decide" src/guard/guard.ts
+grep -q "export async function startChannelAdapter" src/channels/channel-registry.ts && grep -q "export function registerDeliveryBatchPreview" src/delivery.ts && grep -q "session: Session) => Promise<void>" src/delivery.ts && grep -q "trigger?: boolean" src/session-manager.ts && grep -q "findCliResponse" container/agent-runner/src/db/messages-in.ts && grep -q "Promise<number>" container/agent-runner/src/db/messages-out.ts && grep -q "suppressCreatedNotify" src/modules/agent-to-agent/create-agent.ts && grep -q "dedupeKey?: string" src/modules/permissions/sender-approval.ts && grep -q "declineText?: string" src/modules/permissions/sender-approval.ts && grep -q "fyiText?: string" src/modules/permissions/sender-approval.ts && grep -q "export function extendTool" container/agent-runner/src/mcp-tools/server.ts && grep -q "export function registerChannelPreStep" setup/channels/companions.ts && grep -q "instructions.md" src/claude-md-compose.ts && grep -q "await action.decide" src/guard/guard.ts
 ```
 
 The last term requires an async-capable guard seam: the flow's `create_agent`
@@ -210,7 +210,7 @@ pnpm exec vitest run src/modules/slack-agent-flow src/modules/slack-room-members
 ```
 
 ```nc:run effect:test
-source "$PWD/setup/lib/install-slug.sh" && "${CONTAINER_RUNTIME:-docker}" run --rm --entrypoint bun --workdir /app --volume "$PWD/container/agent-runner/src:/app/src:ro" "$(container_image_base):latest" test src/mcp-tools/rooms.test.ts src/mcp-tools/canvas.test.ts
+source "$PWD/setup/lib/install-slug.sh" && "${CONTAINER_RUNTIME:-docker}" run --rm --entrypoint bun --workdir /app --volume "$PWD/container/agent-runner/src:/app/src:ro" "$(container_image_base):latest" test --preload /app/src/modules/index.ts src/mcp-tools/rooms.test.ts src/mcp-tools/canvas.test.ts
 ```
 
 ### 9. Restart the host
@@ -250,6 +250,20 @@ bash setup/lib/restart.sh
   one in the room. The new bot typically answers within ~10 seconds; if it
   stays silent for a minute, an operator can run `bash setup/lib/restart.sh`
   as the fallback.
+- **Workspaces that gate installs.** Where an admin must approve every app
+  install, the workspace refuses the automatic one and the managed service
+  answers with an install link instead of a bot token. The flow does not fall
+  back to hand-building an app: it posts one line into the conversation the
+  create came from — as the ORIGINATING bot, since the origin agent's own
+  reply cannot be delivered while the handler is still running — naming the
+  link to approve, then polls the service (5s, up to 5 minutes) for the bot
+  token the completed install releases. On arrival the rest of the flow runs
+  exactly as if the install had been automatic. On timeout the app parks:
+  `SLACK_APP_TOKEN_<NAME>`, `SLACK_APP_ID_<NAME>` and
+  `SLACK_INSTALL_URL_<NAME>` stay in `.env`, and asking the same agent for the
+  same name again resumes THAT app — it never provisions a second one.
+  `SLACK_INSTALL_WAIT_MS=0` skips the inline wait for installs that always go
+  through a slow approval queue; `SLACK_INSTALL_POLL_MS` moves the cadence.
 - **Teams get one room.** `create_agent({ ..., room: 'none' })` skips the
   shared room; the multi-agent pattern is N such creates followed by ONE
   `create_room` naming all of them. When a batch of creates arrives together,
@@ -273,6 +287,7 @@ bash setup/lib/restart.sh
   It runs outside the host process, so it cannot hot-start the adapter:
   `--restart` runs `bash setup/lib/restart.sh` for you, otherwise it prints
   the restart instruction.
+
 - **Setup-wizard leg.** On a trunk new enough for step 2's check, running
   `bash nanoclaw.sh --slack-agents` does the whole install: the flag registers
   the managed-provisioning pre-step and the companion list

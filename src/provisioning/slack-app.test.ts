@@ -10,6 +10,7 @@ import {
   BOT_SCOPES,
   DEFAULT_SLACK_SERVICE_BASE,
   MANAGED_APP_DESCRIPTION,
+  brokerAppStatus,
   brokerProvision,
   buildManagedAppManifest,
   mapBrokerApp,
@@ -18,6 +19,7 @@ import {
   readManagerToken,
   readServiceBase,
   slackServiceForRegistry,
+  waitForInstall,
 } from './slack-app.js';
 
 interface ManifestShape {
@@ -390,6 +392,139 @@ describe('mapBrokerApp', () => {
       botToken: undefined,
       installUrl: '',
       installError: undefined,
+    });
+  });
+});
+
+describe('deferred install completion', () => {
+  const fetchMock =
+    vi.fn<(url: string, init?: { method?: string; headers?: Record<string, string> }) => Promise<unknown>>();
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+    process.env.SLACK_SERVICE_BASE = 'https://broker.test';
+    vi.stubGlobal('fetch', fetchMock);
+  });
+
+  afterEach(() => {
+    delete process.env.SLACK_SERVICE_BASE;
+    vi.unstubAllGlobals();
+  });
+
+  function response(status: number, payload: unknown): object {
+    return { ok: status >= 200 && status < 300, status, text: async () => JSON.stringify(payload) };
+  }
+
+  /** Answer each successive GET with the next scripted state. */
+  function script(...states: Array<{ status: number; body: unknown }>): void {
+    let i = 0;
+    fetchMock.mockImplementation(async () => {
+      const next = states[Math.min(i, states.length - 1)];
+      i++;
+      return response(next.status, next.body);
+    });
+  }
+
+  /** A fast wait: the cadence under test is the constants' job, not the clock's. */
+  const fast = { intervalMs: 1, timeoutMs: 60 };
+
+  describe('brokerAppStatus', () => {
+    it('reads one app over the authenticated GET', async () => {
+      script({ status: 200, body: { app_id: 'A0PEND1', team_id: 'T1', name: 'Pixel', status: 'pending_install' } });
+
+      await expect(brokerAppStatus('nct_x', 'A0PEND1')).resolves.toEqual({
+        app_id: 'A0PEND1',
+        team_id: 'T1',
+        name: 'Pixel',
+        status: 'pending_install',
+      });
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe('https://broker.test/v1/apps/A0PEND1');
+      expect(init?.method).toBe('GET');
+      expect(init?.headers?.Authorization).toBe('Bearer nct_x');
+    });
+
+    it('escapes the app id rather than pasting it into the path', async () => {
+      script({ status: 200, body: { app_id: 'x', status: 'installed' } });
+      await brokerAppStatus('nct_x', 'A0/../v1/workspaces');
+      expect(fetchMock.mock.calls[0][0]).toBe('https://broker.test/v1/apps/A0%2F..%2Fv1%2Fworkspaces');
+    });
+
+    it('surfaces an unknown app as a BrokerHttpError like every other call', async () => {
+      script({ status: 404, body: { error: 'not_found' } });
+      await expect(brokerAppStatus('nct_x', 'A0GONE')).rejects.toMatchObject({ name: 'BrokerHttpError', status: 404 });
+    });
+  });
+
+  describe('waitForInstall', () => {
+    it('polls while the workspace has not approved yet, then takes the one-time token', async () => {
+      script(
+        { status: 200, body: { app_id: 'A0PEND1', status: 'pending_install' } },
+        { status: 200, body: { app_id: 'A0PEND1', status: 'pending_install' } },
+        { status: 200, body: { app_id: 'A0PEND1', status: 'installed', bot_token: 'xoxb-finally' } },
+      );
+
+      await expect(waitForInstall('nct_x', 'A0PEND1', fast)).resolves.toEqual({ botToken: 'xoxb-finally' });
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('reports progress to the caller once per attempt', async () => {
+      script(
+        { status: 200, body: { status: 'pending_install' } },
+        { status: 200, body: { status: 'installed', bot_token: 'xoxb-1' } },
+      );
+      const onPoll = vi.fn();
+
+      await waitForInstall('nct_x', 'A0PEND1', { ...fast, onPoll });
+      expect(onPoll).toHaveBeenCalledTimes(2);
+      expect(onPoll.mock.calls.every(([elapsed]) => typeof elapsed === 'number')).toBe(true);
+    });
+
+    it('resolves null when the approval never lands — a timeout is not an error', async () => {
+      script({ status: 200, body: { app_id: 'A0PEND1', status: 'pending_install' } });
+
+      await expect(waitForInstall('nct_x', 'A0PEND1', fast)).resolves.toBeNull();
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(1);
+    });
+
+    it('stops on an app the service does not know (404) instead of waiting it out', async () => {
+      script({ status: 404, body: { error: 'not_found' } });
+
+      await expect(waitForInstall('nct_x', 'A0GONE', fast)).resolves.toBeNull();
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it('stops on a deleted app', async () => {
+      script({ status: 200, body: { app_id: 'A0DEAD', status: 'deleted' } });
+
+      await expect(waitForInstall('nct_x', 'A0DEAD', fast)).resolves.toBeNull();
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it('stops when the token was already released — polling cannot get a second copy', async () => {
+      script({ status: 200, body: { app_id: 'A0PEND1', status: 'installed' } });
+
+      await expect(waitForInstall('nct_x', 'A0PEND1', fast)).resolves.toBeNull();
+      expect(fetchMock).toHaveBeenCalledOnce();
+    });
+
+    it('polls through a service hiccup rather than giving up on it', async () => {
+      script(
+        { status: 502, body: { error: 'bad_gateway' } },
+        { status: 200, body: { status: 'installed', bot_token: 'xoxb-after-hiccup' } },
+      );
+
+      await expect(waitForInstall('nct_x', 'A0PEND1', fast)).resolves.toEqual({ botToken: 'xoxb-after-hiccup' });
+    });
+
+    it('rethrows a credential refusal — the next poll cannot change that answer', async () => {
+      script({ status: 401, body: { message: 'Install token expired.' } });
+
+      await expect(waitForInstall('nct_x', 'A0PEND1', fast)).rejects.toMatchObject({
+        name: 'BrokerHttpError',
+        status: 401,
+      });
+      expect(fetchMock).toHaveBeenCalledOnce();
     });
   });
 });

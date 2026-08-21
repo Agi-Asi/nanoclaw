@@ -585,12 +585,12 @@ describe('non-bot membership change in a wired room (case 4)', () => {
     const msg = mockWriteSessionMessage.mock.calls[0]![2] as {
       kind: string;
       channelType: string;
-      trigger: number;
+      trigger: boolean;
       content: string;
     };
     // kind 'chat' + sender 'system' (container-restart's system-note shape):
     // the container poll loop filters kind 'system' rows out of agent batches.
-    expect(msg).toMatchObject({ kind: 'chat', channelType: 'agent', trigger: 0 });
+    expect(msg).toMatchObject({ kind: 'chat', channelType: 'agent', trigger: false });
     const content = JSON.parse(msg.content) as { text: string; sender: string };
     expect(content.sender).toBe('system');
     expect(content.text).toContain('<@U0NEWHUMAN> joined this room');

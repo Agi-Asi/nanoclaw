@@ -462,7 +462,7 @@ async function handleMemberChange(event: MembershipEvent, platformId: string): P
           channelType: 'agent',
           threadId: null,
           content: JSON.stringify({ text, sender: 'system', senderId: 'system' }),
-          trigger: 0,
+          trigger: false,
         });
       } catch (err) {
         log.warn('slack-room-membership: membership note write failed', {

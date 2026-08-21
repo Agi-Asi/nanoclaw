@@ -112,6 +112,13 @@ const STATUS_GRACE_MS = 3 * 60_000;
 const STATUS_TRACK_TTL_MS = 24 * 60 * 60_000;
 const STATUS_RECONCILE_INTERVAL_MS = 60_000;
 
+/**
+ * Transcript text is routed to the agent inline (the sandbox usually has no
+ * `dial` CLI to fetch it with). Longer transcripts are clipped; the notice
+ * names the call id so the full text stays one `dial call get` away.
+ */
+const TRANSCRIPT_MAX_CHARS = 4000;
+
 interface TrackedSend {
   to: string;
   from: string;
@@ -512,7 +519,41 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     }
   }
 
-  /** Route one inbound event — SMS text, ended-call notifications, outbound delivery verdicts. */
+  /**
+   * Read one call record through the CLI. `call.transcribed` is a thin event
+   * (call id only), so direction, numbers and the transcript itself all come
+   * from here. Returns null when the record cannot be read.
+   */
+  async function fetchCall(callId: string): Promise<{
+    direction: string;
+    from: string;
+    to: string;
+    duration: number | null;
+    transcript: string;
+  } | null> {
+    try {
+      const { stdout } = await execFileAsync(config.cliPath, ['call', 'get', callId, '--json'], {
+        encoding: 'utf8',
+        timeout: SEND_TIMEOUT_MS,
+        env: cliEnvFor(config.cliPath),
+      });
+      const parsed = JSON.parse(stdout) as { ok?: boolean; call?: Record<string, unknown> } & Record<string, unknown>;
+      if (parsed.ok === false) throw new Error(`Dial CLI could not read the call: ${stdout.trim().slice(0, 200)}`);
+      const c = (parsed.call ?? parsed) as Record<string, unknown>;
+      return {
+        direction: typeof c.direction === 'string' ? c.direction : '',
+        from: typeof c.from === 'string' ? c.from : '',
+        to: typeof c.to === 'string' ? c.to : '',
+        duration: typeof c.duration === 'number' ? c.duration : null,
+        transcript: typeof c.transcript === 'string' ? c.transcript.trim() : '',
+      };
+    } catch (err) {
+      log.warn('Dial: could not read the call record', { callId, err });
+      return null;
+    }
+  }
+
+  /** Route one inbound event — SMS text, call notifications and transcripts, outbound delivery verdicts. */
   async function routeEvent(env: DialEventEnvelope): Promise<void> {
     if (!setup) return;
     if (env.id && seenBefore(env.id)) return;
@@ -520,6 +561,9 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
 
     let peer = '';
     let text = '';
+    // Set by branches whose natural id (the call id) is shared with another
+    // event for the same call, so the two never collapse into one message.
+    let messageId = '';
     // The Dial number this event arrived on (data.to for SMS; our own side of
     // a call). Used as the messaging group's platform_id so one adapter can
     // serve multiple Dial numbers — each number is its own group/line.
@@ -556,6 +600,38 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
         data.transcriptAvailable && callId ? ` Run \`dial call get ${callId}\` for the transcript.` : '';
       const to = outbound && callee ? ` to ${callee}` : '';
       text = `[Voice call ${outbound ? 'outbound' : 'inbound'}${to} ${data.status ?? 'ended'}${data.canceled ? ' (canceled)' : ''}${dur}.${transcript}]`;
+    } else if (env.type === 'call.transcribed') {
+      // Fires once per call, shortly after call.ended, and carries only the
+      // call id. Route the transcript to the same thread the call notice went
+      // to: the caller for an inbound call, the operator for an outbound one.
+      const callId = typeof data.callId === 'string' ? data.callId : '';
+      if (!callId) return;
+      const call = await fetchCall(callId);
+      if (!call) return;
+      const outbound = call.direction === 'outbound';
+      eventLine = outbound ? call.from : call.to;
+      if (outbound) {
+        peer = await ownerNumber();
+        if (!peer) {
+          log.warn('Dial: outbound call transcribed but no paired owner to notify — dropping event', { callId });
+          return;
+        }
+      } else {
+        peer = call.from;
+      }
+      const who = outbound ? (call.to ? ` to ${call.to}` : '') : call.from ? ` from ${call.from}` : '';
+      const dur = call.duration !== null ? ` (${call.duration}s)` : '';
+      const dir = outbound ? 'outbound' : 'inbound';
+      if (call.transcript) {
+        const clipped =
+          call.transcript.length > TRANSCRIPT_MAX_CHARS
+            ? `${call.transcript.slice(0, TRANSCRIPT_MAX_CHARS)}… (clipped — run \`dial call get ${callId}\` for the full transcript)`
+            : call.transcript;
+        text = `[Transcript of the ${dir} call${who}${dur}:\n${clipped}]`;
+      } else {
+        text = `[Transcript ready for the ${dir} call${who}${dur}. Run \`dial call get ${callId}\` to read it.]`;
+      }
+      messageId = `${callId}:transcript`;
     } else if (env.type === 'message.status_changed') {
       await applyDeliveryStatus(data, env.createdAt);
       return;
@@ -564,7 +640,8 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     }
     if (!peer || !text) return;
 
-    const id = [data.messageId, data.callId, env.id].find((v): v is string => typeof v === 'string' && !!v);
+    const id =
+      messageId || [data.messageId, data.callId, env.id].find((v): v is string => typeof v === 'string' && !!v);
     // Public-line model: the Dial number itself is the messaging group; the peer
     // is the thread, so replies route back to them and every sender shares one
     // (public) wiring. `eventLine` is the number this event hit; fall back to the

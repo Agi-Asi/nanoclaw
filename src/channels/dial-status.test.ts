@@ -8,13 +8,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // one test can answer a send and a later `message list` differently.
 type Spawn = { file: string; args: string[]; opts: Record<string, unknown> };
 const spawns: Spawn[] = [];
-const replies: { send: { stdout: string } | Error; list: { stdout: string } | Error } = {
+const replies: {
+  send: { stdout: string } | Error;
+  list: { stdout: string } | Error;
+  call: { stdout: string } | Error;
+} = {
   send: { stdout: JSON.stringify({ ok: true, message: { id: 'msg_1' } }) },
   list: { stdout: JSON.stringify({ ok: true, messages: [] }) },
+  call: { stdout: JSON.stringify({ ok: true, call: {} }) },
 };
 function reply(args: string[]): { stdout: string } | Error {
-  return args[0] === 'message' && args[1] === 'list' ? replies.list : replies.send;
+  if (args[0] === 'message' && args[1] === 'list') return replies.list;
+  if (args[0] === 'call' && args[1] === 'get') return replies.call;
+  return replies.send;
 }
+// Paired owner rows, mutable per test (outbound call notices route to the owner).
+const owners: Array<{ user_id: string }> = [];
 
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
@@ -51,7 +60,7 @@ vi.mock('../db/messaging-groups.js', () => ({
   getMessagingGroupsByChannel: async () => [{ id: 'mg-1', platform_id: '+14155550123', is_group: 1 }],
   updateMessagingGroup: async () => {},
 }));
-vi.mock('../modules/permissions/db/user-roles.js', () => ({ getOwners: async () => [] }));
+vi.mock('../modules/permissions/db/user-roles.js', () => ({ getOwners: async () => owners }));
 vi.mock('../modules/permissions/db/users.js', () => ({ upsertUser: async () => {} }));
 
 import type { ChannelAdapter, ChannelSetup, InboundMessage, OutboundMessage } from './adapter.js';
@@ -59,6 +68,7 @@ import { createDialAdapter } from './dial.js';
 
 const LINE = '+14155550123';
 const PEER = '+15557654321';
+const OWNER = '+17862964774';
 const TEN_DLC = "The carrier rejected the message because the sender isn't registered for A2P/10DLC messaging.";
 const SPOOL = path.join(TEST_DIR, 'dial', 'inbound');
 const PENDING = path.join(TEST_DIR, 'dial', 'pending-sends.json');
@@ -120,6 +130,8 @@ beforeEach(async () => {
   spawns.length = 0;
   replies.send = { stdout: JSON.stringify({ ok: true, message: { id: 'msg_1' } }) };
   replies.list = { stdout: JSON.stringify({ ok: true, messages: [] }) };
+  replies.call = { stdout: JSON.stringify({ ok: true, call: {} }) };
+  owners.length = 0;
   onInbound = vi.fn<ChannelSetup['onInbound']>();
   vi.useFakeTimers({ now: new Date('2026-08-20T09:00:00Z') });
   await start();
@@ -237,5 +249,81 @@ describe('Dial outbound delivery verdicts', () => {
       ((onInbound.mock.calls[0] as [string, string | null, InboundMessage])[2].content as { text: string }).text,
     ).toContain('failed');
     expect(pendingIds()).toEqual([]);
+  });
+});
+
+function transcribedEvent(callId = 'call_1'): Record<string, unknown> {
+  return {
+    id: `evt_${++seq}`,
+    object: 'event',
+    type: 'call.transcribed',
+    version: 1,
+    createdAt: '2026-08-21T09:05:02.820Z',
+    relatedObject: { id: callId, type: 'call', url: `/api/v1/calls/${callId}` },
+    data: { callId },
+  };
+}
+
+function callRecord(over: Record<string, unknown>): { stdout: string } {
+  return {
+    stdout: JSON.stringify({
+      ok: true,
+      call: {
+        id: 'call_1',
+        direction: 'inbound',
+        from: PEER,
+        to: LINE,
+        duration: 36,
+        transcript: 'User: hi\nAgent: hello\n',
+        ...over,
+      },
+    }),
+  };
+}
+
+describe('Dial call transcripts', () => {
+  it('reads the call record and routes an inbound transcript to the caller thread', async () => {
+    replies.call = callRecord({});
+    await spool(transcribedEvent());
+
+    const gets = spawns.filter((s) => s.args[0] === 'call' && s.args[1] === 'get');
+    expect(gets).toHaveLength(1);
+    expect(gets[0].args).toEqual(['call', 'get', 'call_1', '--json']);
+
+    expect(onInbound).toHaveBeenCalledTimes(1);
+    const [platformId, threadId, msg] = onInbound.mock.calls[0] as [string, string | null, InboundMessage];
+    expect(platformId).toBe(LINE);
+    expect(threadId).toBe(PEER);
+    expect(msg.id).toBe('call_1:transcript');
+    const text = (msg.content as { text: string }).text;
+    expect(text).toContain('inbound call from ' + PEER);
+    expect(text).toContain('User: hi\nAgent: hello');
+  });
+
+  it('routes an outbound transcript to the paired owner, not the person called', async () => {
+    owners.push({ user_id: `dial:${OWNER}` });
+    replies.call = callRecord({ direction: 'outbound', from: LINE, to: '+34624031651', duration: 7 });
+    await spool(transcribedEvent());
+
+    expect(onInbound).toHaveBeenCalledTimes(1);
+    const [platformId, threadId, msg] = onInbound.mock.calls[0] as [string, string | null, InboundMessage];
+    expect(platformId).toBe(LINE);
+    expect(threadId).toBe(OWNER);
+    expect((msg.content as { text: string }).text).toContain('outbound call to +34624031651 (7s)');
+  });
+
+  it('points at `dial call get` when the record has no transcript text', async () => {
+    replies.call = callRecord({ transcript: null });
+    await spool(transcribedEvent());
+    expect(onInbound).toHaveBeenCalledTimes(1);
+    const text = ((onInbound.mock.calls[0] as [string, string | null, InboundMessage])[2].content as { text: string })
+      .text;
+    expect(text).toContain('dial call get call_1');
+  });
+
+  it('drops the event when the call record cannot be read', async () => {
+    replies.call = new Error('boom');
+    await spool(transcribedEvent());
+    expect(onInbound).not.toHaveBeenCalled();
   });
 });

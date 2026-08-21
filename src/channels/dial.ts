@@ -113,6 +113,15 @@ const STATUS_TRACK_TTL_MS = 24 * 60 * 60_000;
 const STATUS_RECONCILE_INTERVAL_MS = 60_000;
 
 /**
+ * Every notice the adapter itself writes into a thread (delivery failures,
+ * transcripts) opens with this so no reader mistakes it for something the
+ * correspondent typed. The notice has to carry a sender to pass the line's
+ * sender policy, and the thread's own correspondent is the only identity the
+ * router already admits; NanoClaw has no first-class system sender yet.
+ */
+const SYSTEM_NOTICE = 'NanoClaw system notice:';
+
+/**
  * Transcript text is routed to the agent inline (the sandbox usually has no
  * `dial` CLI to fetch it with). Longer transcripts are clipped; the notice
  * names the call id so the full text stays one `dial call get` away.
@@ -420,8 +429,8 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
   /**
    * Tell the agent that sent the message. The notice goes into the same line +
    * thread the reply went out on, attributed to the correspondent (the thread's
-   * known sender, so it passes the line's sender policy) and framed as a
-   * bracketed system notice like an ended-call report. It deliberately does NOT
+   * known sender, so it passes the line's sender policy) and opened with
+   * SYSTEM_NOTICE so the attribution cannot mislead. It deliberately does NOT
    * go back out over SMS: that is the route that just failed.
    */
   async function notifyDeliveryFailure(f: {
@@ -436,7 +445,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     const activeLine = f.from || (await line());
     const platformId = activeLine || f.to;
     const threadId = activeLine ? f.to : null;
-    const text = `[Delivery failure: your SMS to ${f.to} was not delivered (${f.state}). ${f.reason} Assume ${f.to} did not receive your last message.]`;
+    const text = `[${SYSTEM_NOTICE} your SMS to ${f.to} was not delivered (${f.state}). ${f.reason} Assume ${f.to} did not receive your last message.]`;
     const msg: InboundMessage = {
       id: `${f.messageId}:delivery`,
       kind: 'chat',
@@ -627,9 +636,9 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
           call.transcript.length > TRANSCRIPT_MAX_CHARS
             ? `${call.transcript.slice(0, TRANSCRIPT_MAX_CHARS)}… (clipped — run \`dial call get ${callId}\` for the full transcript)`
             : call.transcript;
-        text = `[Transcript of the ${dir} call${who}${dur}:\n${clipped}]`;
+        text = `[${SYSTEM_NOTICE} transcript of the ${dir} call${who}${dur}:\n${clipped}]`;
       } else {
-        text = `[Transcript ready for the ${dir} call${who}${dur}. Run \`dial call get ${callId}\` to read it.]`;
+        text = `[${SYSTEM_NOTICE} transcript ready for the ${dir} call${who}${dur}. Run \`dial call get ${callId}\` to read it.]`;
       }
       messageId = `${callId}:transcript`;
     } else if (env.type === 'message.status_changed') {

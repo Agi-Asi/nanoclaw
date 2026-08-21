@@ -155,6 +155,7 @@ describe('Dial outbound delivery verdicts', () => {
     expect(platformId).toBe(LINE);
     expect(threadId).toBe(PEER);
     const text = (msg.content as { text: string }).text;
+    expect(text).toMatch(/^\[NanoClaw system notice:/);
     expect(text).toContain(PEER);
     expect(text).toContain('undelivered');
     expect(text).toContain(TEN_DLC);
@@ -296,6 +297,7 @@ describe('Dial call transcripts', () => {
     expect(threadId).toBe(PEER);
     expect(msg.id).toBe('call_1:transcript');
     const text = (msg.content as { text: string }).text;
+    expect(text).toMatch(/^\[NanoClaw system notice:/);
     expect(text).toContain('inbound call from ' + PEER);
     expect(text).toContain('User: hi\nAgent: hello');
   });

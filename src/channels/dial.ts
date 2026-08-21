@@ -122,6 +122,30 @@ const STATUS_RECONCILE_INTERVAL_MS = 60_000;
 const SYSTEM_NOTICE = 'NanoClaw system notice:';
 
 /**
+ * A failure notice wakes the agent in the thread whose SMS just bounced. If the
+ * agent answers it, that answer goes out over the same broken route, bounces,
+ * and would raise another notice: a loop that costs a send and an agent turn
+ * per lap. One notice per (line, correspondent) per window breaks it; the
+ * notice itself also tells the agent not to reply over SMS.
+ */
+const FAILURE_NOTICE_COOLDOWN_MS = 60 * 60_000;
+
+/**
+ * `dial message list` returns at most this many rows, newest first, with no
+ * paging. A busier account can push an old quiet send past the edge.
+ */
+const LIST_CAP = 100;
+
+/**
+ * Anything a correspondent typed, or said on a call, is rewritten so it cannot
+ * pose as one of the adapter's own notices. Text is the only channel the
+ * notice has, so the prefix is only worth something if nobody else can use it.
+ */
+function neutraliseNoticePrefix(text: string): string {
+  return text.split(SYSTEM_NOTICE).join('(sender-typed) NanoClaw system notice:');
+}
+
+/**
  * Transcript text is routed to the agent inline (the sandbox usually has no
  * `dial` CLI to fetch it with). Longer transcripts are clipped; the notice
  * names the call id so the full text stays one `dial call get` away.
@@ -255,6 +279,9 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
   const pending = new Map<string, TrackedSend>();
   let reconcileTimer: ReturnType<typeof setInterval> | null = null;
   let reconciling = false;
+  // (line|peer) → epoch ms of the last failure notice routed to that thread.
+  const lastFailureNotice = new Map<string, number>();
+  let listCapWarned = false;
 
   function loadPending(): void {
     try {
@@ -409,12 +436,27 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     if (!messageId) return;
     const state = typeof data.deliveryState === 'string' ? data.deliveryState : '';
     const tracked = pending.get(messageId);
-    const to = (typeof data.to === 'string' && data.to) || tracked?.to || '';
-    const from = (typeof data.from === 'string' && data.from) || tracked?.from || '';
+    if (!tracked) {
+      // A verdict for a send this adapter did not make: the agent using the
+      // `dial` CLI inside its sandbox, the operator on the dashboard, another
+      // install on the same account. Not ours to route into a thread — doing
+      // so would open sessions on lines this install never served.
+      log.info('Dial: delivery verdict for a send this adapter did not make — ignoring', { messageId, state });
+      return;
+    }
+    const to = (typeof data.to === 'string' && data.to) || tracked.to;
+    const from = (typeof data.from === 'string' && data.from) || tracked.from;
 
     if (state === 'delivered') {
       untrack(messageId);
       log.info('Dial: outbound SMS delivered', { messageId, to });
+      return;
+    }
+    if (state === 'unconfirmed' || state === 'unknown') {
+      // This rail sends no delivery receipts (iMessage, some RCS): nothing
+      // further will ever come for the delivery axis, so stop waiting.
+      untrack(messageId);
+      log.info('Dial: outbound message accepted on a rail without delivery receipts', { messageId, to, state });
       return;
     }
     if (state !== 'undelivered' && state !== 'failed') return;
@@ -445,7 +487,20 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
     const activeLine = f.from || (await line());
     const platformId = activeLine || f.to;
     const threadId = activeLine ? f.to : null;
-    const text = `[${SYSTEM_NOTICE} your SMS to ${f.to} was not delivered (${f.state}). ${f.reason} Assume ${f.to} did not receive your last message.]`;
+
+    const key = `${platformId}|${f.to}`;
+    const last = lastFailureNotice.get(key) ?? 0;
+    if (Date.now() - last < FAILURE_NOTICE_COOLDOWN_MS) {
+      log.warn('Dial: further SMS to this correspondent bounced — notice already sent, not repeating', {
+        messageId: f.messageId,
+        to: f.to,
+        state: f.state,
+      });
+      return;
+    }
+    lastFailureNotice.set(key, Date.now());
+
+    const text = `[${SYSTEM_NOTICE} your SMS to ${f.to} was not delivered (${f.state}). ${f.reason} Assume ${f.to} did not receive your last message. Do not reply to this notice and do not resend over SMS: it will bounce the same way. If ${f.to} must be reached, tell the operator.]`;
     const msg: InboundMessage = {
       id: `${f.messageId}:delivery`,
       kind: 'chat',
@@ -502,10 +557,18 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       if (!parsed.ok || !Array.isArray(parsed.messages)) {
         throw new Error(`unexpected \`dial message list\` output: ${stdout.trim().slice(0, 200)}`);
       }
+      if (parsed.messages.length >= LIST_CAP && !listCapWarned) {
+        listCapWarned = true;
+        log.warn('Dial: `dial message list` returned its cap — older quiet sends may never be reconciled', {
+          cap: LIST_CAP,
+          pending: quiet.length,
+        });
+      }
       const wanted = new Set(quiet);
       for (const row of parsed.messages) {
         const id = typeof row.id === 'string' ? row.id : '';
-        if (!wanted.has(id)) continue;
+        // An event may have settled this id while the list call was in flight.
+        if (!wanted.has(id) || !pending.has(id)) continue;
         // `deliveryState`/`deliveryError` is the current shape; `status`/
         // `statusError` are the older aliases the API still returns.
         const state =
@@ -582,6 +645,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       peer = typeof data.from === 'string' ? data.from : '';
       eventLine = typeof data.to === 'string' ? data.to : '';
       text = typeof data.body === 'string' ? data.body : '';
+      text = neutraliseNoticePrefix(text);
       // Pairing codes are consumed before any agent sees them. Confirm from the
       // number the code was sent to (falls back to the account default).
       if (peer && (await consumePairing(peer, text, eventLine || (await line())))) return;
@@ -632,6 +696,7 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       const dur = call.duration !== null ? ` (${call.duration}s)` : '';
       const dir = outbound ? 'outbound' : 'inbound';
       if (call.transcript) {
+        call.transcript = neutraliseNoticePrefix(call.transcript);
         const clipped =
           call.transcript.length > TRANSCRIPT_MAX_CHARS
             ? `${call.transcript.slice(0, TRANSCRIPT_MAX_CHARS)}… (clipped — run \`dial call get ${callId}\` for the full transcript)`
@@ -787,9 +852,9 @@ export function createDialAdapter(config: DialConfig): ChannelAdapter {
       fs.mkdirSync(spoolDir, { recursive: true });
       const commandTarget = ensureCommandTarget() ? 'ok' : 'unverified';
 
+      loadPending(); // before the spool: a verdict spooled while we were down must find its send
       drainSpool(); // anything spooled while we were down
-      loadPending();
-      void reconcilePending(); // verdicts that landed while we were down
+      void reconcilePending(); // verdicts that never reached the spool
       reconcileTimer = setInterval(() => void reconcilePending(), STATUS_RECONCILE_INTERVAL_MS);
       try {
         watcher = fs.watch(spoolDir, () => drainSpool());

@@ -28,14 +28,11 @@
  * failed: a provider install is fully deterministic with no prompts).
  */
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 
 import { applySkill, type ApplyResult } from '../../scripts/skill-apply.js';
-import { parseDirectives } from '../../scripts/skill-directives.js';
 
 /** Commands the directive engine emits that the surrounding setup flow owns. */
-export function isFlowOwnedCommand(cmd: string): boolean {
+function isFlowOwnedCommand(cmd: string): boolean {
   return (
     /\bpnpm\s+run\s+build\b/.test(cmd) ||
     /\btsc\b/.test(cmd) ||
@@ -46,52 +43,6 @@ export function isFlowOwnedCommand(cmd: string): boolean {
     // inside the install would recurse. The flow runs runAuth itself.
     /provider-auth/.test(cmd)
   );
-}
-
-/** The only package-subtree install shape provider skills currently emit. */
-export function agentRunnerDependenciesSatisfied(cmd: string, projectRoot: string): boolean {
-  const match = cmd.match(/^\s*cd\s+container\/agent-runner\s+&&\s+bun\s+add\s+(.+?)\s*$/);
-  if (!match) return false;
-  let dependencies: Record<string, string>;
-  try {
-    const pkg = JSON.parse(readFileSync(join(projectRoot, 'container', 'agent-runner', 'package.json'), 'utf-8')) as {
-      dependencies?: Record<string, string>;
-    };
-    dependencies = pkg.dependencies ?? {};
-  } catch {
-    return false;
-  }
-  const specs = match[1]!.trim().split(/\s+/);
-  if (specs.length === 0) return false;
-  return specs.every((spec) => {
-    const parsed = spec.match(/^(@[^/]+\/[^@]+|[^@]+)@(.+)$/);
-    return parsed !== null && dependencies[parsed[1]!] === parsed[2];
-  });
-}
-
-function branchCopyTargets(skillDir: string): Set<string> {
-  const md = readFileSync(join(skillDir, 'SKILL.md'), 'utf-8');
-  const targets = new Set<string>();
-  for (const directive of parseDirectives(md)) {
-    if (directive.kind !== 'copy' || typeof directive.attrs['from-branch'] !== 'string') continue;
-    for (const line of directive.body) {
-      targets.add(line.includes('->') ? line.split('->')[1]!.trim() : line.trim());
-    }
-  }
-  return targets;
-}
-
-function snapshotTargets(projectRoot: string, targets: Set<string>): Map<string, string | undefined> {
-  return new Map(
-    [...targets].map((target) => {
-      const file = join(projectRoot, target);
-      return [target, existsSync(file) ? readFileSync(file).toString('base64') : undefined];
-    }),
-  );
-}
-
-function branchTransportCommand(cmd: string): boolean {
-  return /^\s*git\s+(?:fetch|show)\b/.test(cmd);
 }
 
 export interface ProviderInstallResult {
@@ -106,21 +57,11 @@ export async function applyProviderSkill(skillDir: string, projectRoot: string):
   // A provider SKILL.md has no prompt directives (vault-only auth runs
   // separately). No resolveInput is passed: absent ⇒ any prompt defers, which
   // is exactly the old defer-all stub's semantics with no stub to maintain.
-  const branchTargets = branchCopyTargets(skillDir);
-  const beforeBranchFiles = snapshotTargets(projectRoot, branchTargets);
-  let commandMutated = false;
   const result = await applySkill(skillDir, projectRoot, {
-    mode: 'refresh',
     exec: (cmd) => {
       if (isFlowOwnedCommand(cmd)) return; // build/test/auth are the flow's job
-      // `bun add` is a run directive because dependencies belong to the
-      // agent-runner subtree, not the host pnpm workspace. Avoid re-running it
-      // (and spuriously rebuilding the image) when every exact pin is present.
-      if (agentRunnerDependenciesSatisfied(cmd, projectRoot)) return;
       execSync(cmd, { cwd: projectRoot, stdio: 'pipe' });
-      if (!branchTransportCommand(cmd)) commandMutated = true;
     },
-    skipEffects: ['build', 'test', 'external'],
     // Fork-aware: reuse the existing resolver (handles upstream/fork remotes and
     // the auto-add-upstream fallback) instead of assuming `origin` — same call
     // setup/channels/slack.ts makes for the `channels` branch.
@@ -133,16 +74,9 @@ export async function applyProviderSkill(skillDir: string, projectRoot: string):
   });
 
   const blockers = [...result.agentTasks.map((t) => t.reason), ...result.deferred];
-  const afterBranchFiles = snapshotTargets(projectRoot, branchTargets);
-  const branchFilesChanged = [...branchTargets].some(
-    (target) => beforeBranchFiles.get(target) !== afterBranchFiles.get(target),
-  );
-  const nonBranchFileMutation = result.journal.some(
-    (entry) => entry.op !== 'ran' && !(entry.op === 'wrote' && branchTargets.has(entry.path)),
-  );
   return {
     apply: result,
-    changed: commandMutated || branchFilesChanged || nonBranchFileMutation,
+    changed: result.applied.length > 0,
     blockers,
   };
 }

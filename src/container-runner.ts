@@ -37,6 +37,7 @@ import { GROUP_FOLDER_LABEL, labelValueLegal, specInvalid } from './drivers/type
 import type { ContainerSpec, MountSpec, SessionFailure, SessionSpec } from './drivers/types.js';
 import { getGatewayProvider, type GatewayContribution } from './gateway-providers/index.js';
 import { initGroupFilesystem } from './group-init.js';
+import { getAgentMailbox } from './mailbox/index.js';
 import { stopTypingRefresh } from './modules/typing/index.js';
 import { log } from './log.js';
 import { validateAdditionalMounts } from './modules/mount-security/index.js';
@@ -53,7 +54,9 @@ import {
   heartbeatPath,
   markContainerRunning,
   markContainerStopped,
+  sessionContextPath,
   sessionDir,
+  writeSessionContext,
   writeSessionRouting,
 } from './session-manager.js';
 import type { AgentGroup, Session } from './types.js';
@@ -166,6 +169,9 @@ async function spawnContainer(session: Session): Promise<void> {
     await writeDestinations(agentGroup.id, session.id);
   }
   await writeSessionRouting(agentGroup.id, session.id);
+  const mailboxKey = { agentGroupId: agentGroup.id, sessionId: session.id };
+  const mailbox = getAgentMailbox();
+  writeSessionContext(agentGroup.id, session.id, await mailbox.runnerContext(mailboxKey));
 
   // Materialize container.json from DB — writes fresh file and returns
   // the config object, threaded through provider resolution, buildMounts,
@@ -182,6 +188,8 @@ async function spawnContainer(session: Session): Promise<void> {
 
   const mounts = await buildMounts(agentGroup, session, containerConfig, provider, contribution);
   const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
+  const mailboxEnvironment = await mailbox.runnerEnvironment(mailboxKey);
+
   const driver = getSessionDriver();
   // The gateway's per-session contribution — typed env and mounts (and, on a
   // driver that manages them, auxiliary containers), merged into the spec
@@ -211,6 +219,7 @@ async function spawnContainer(session: Session): Promise<void> {
     containerConfig,
     contribution,
     gateway,
+    mailboxEnvironment,
   });
 
   log.info('Spawning session', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
@@ -472,8 +481,15 @@ export async function buildMounts(
   const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
   const scope = agentGroup.id;
 
-  // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .heartbeat)
+  // Session workspace: mailbox-selected state plus outbox and heartbeat files.
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false, mountClass: 'group-state', scope });
+  mounts.push({
+    hostPath: sessionContextPath(agentGroup.id, session.id),
+    containerPath: '/app/.nanoclaw-session.json',
+    readonly: true,
+    mountClass: 'group-state',
+    scope,
+  });
 
   // Agent group folder at /workspace/agent (RW for working files + shared memory)
   mounts.push({
@@ -628,6 +644,8 @@ export interface ComposeSessionSpecInput {
    * env, mounts, and (capability-gated) auxiliary containers.
    */
   gateway: GatewayContribution;
+  /** Non-secret configuration supplied by the selected mailbox implementation. */
+  mailboxEnvironment: Record<string, string>;
 }
 
 /**
@@ -648,10 +666,12 @@ export function mergeMounts(composed: MountSpec[], contributed: MountSpec[]): Mo
  * says how it is realized.
  */
 export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec {
-  const { agentGroup, session, containerName, mounts, containerConfig, contribution, gateway } = input;
+  const { agentGroup, session, containerName, mounts, containerConfig, contribution, gateway, mailboxEnvironment } =
+    input;
 
   const env: Record<string, string> = {
     TZ: containerConfig.timezone ?? TIMEZONE,
+    ...mailboxEnvironment,
   };
   // The contributed lane (ContainerSpec.contributedEnv): registry-sourced env,
   // exempt from the credential-NAME check and still refused credential VALUES.
@@ -727,7 +747,9 @@ export function composeSessionSpec(input: ComposeSessionSpecInput): SessionSpec 
       pidsLimit: parsePidsLimit(CONTAINER_PIDS_LIMIT),
       shmSizeMb: SHM_SIZE_MB,
     },
-    runtimeTier: 'container',
+    // The group's configured tier; the driver refuses one it cannot realize
+    // (validateSpec, against capabilities().isolationTiers).
+    runtimeTier: containerConfig.runtimeTier ?? 'container',
     runAs,
     stopGraceSeconds: STOP_GRACE_SECONDS,
   };

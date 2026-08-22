@@ -9,7 +9,7 @@ description: Use Cursor (local Agent SDK) as a full agent provider — planning,
 
 NanoClaw selects each group's agent backend from `container_configs.provider` (default `claude`). This skill installs the Cursor provider: copy the payload from the `providers` branch, append one import to each of the three provider barrels, pin `@cursor/sdk` in the agent-runner tree, rebuild, then run the vault auth walk-through.
 
-The provider runs `@cursor/sdk` in-process inside the container (`Agent.create` / `resume` / `send`): native streaming, MCP tools, a local agent store (the continuation is a Cursor `agentId`). Credentials are **vault-only**: OneCLI injects the real Cursor API key on the wire and the container only ever sees a placeholder `CURSOR_API_KEY` — no key in `.env`, nothing readable in the container. Cursor-account OAuth and a dashboard key entered into setup's local masked prompt create two narrowly scoped vault entries from the same handoff file: `api2.cursor.sh/auth/exchange_user_api_key` and `api.cursor.com/v1/models`. Cursor exchanges the user key at the first endpoint for a short-lived runtime token; those runtime calls bypass OneCLI so its proxy neither overwrites the token nor stalls Cursor's streamed request bodies. Never put a key in chat.
+The provider runs `@cursor/sdk` in-process inside the container (`Agent.create` / `resume` / `send`): native streaming, MCP tools, a local agent store (the continuation is a Cursor `agentId`). Credentials are **vault-only**: OneCLI injects the real Cursor API key on the wire and the container only ever sees a placeholder `CURSOR_API_KEY` — no key in `.env`, nothing readable in the container. Cursor-account OAuth and a dashboard key entered into setup's local masked prompt create two narrowly scoped vault entries from the same handoff file: `api2.cursor.sh/auth/exchange_user_api_key` and `api.cursor.com/v1/models`. Cursor exchanges the user key at the first endpoint for a short-lived runtime token held only by the SDK. Later requests still use the configured proxy, but the exact-route vault rules do not overwrite that token. Never put a key in chat.
 
 The mechanical steps under **Install** carry `nc:` directive fences: an agent reads the prose and applies them, and a parser can apply them deterministically from the same document. Every directive is idempotent, so the whole skill is safe to re-run; anything a parser can't apply falls back to the prose beside it.
 
@@ -42,6 +42,7 @@ container/agent-runner/src/providers/cursor-registration.test.ts
 container/agent-runner/src/providers/cursor.factory.test.ts
 container/agent-runner/src/providers/cursor-auth.test.ts
 container/agent-runner/src/providers/cursor-hook.test.ts
+container/agent-runner/src/providers/cursor.poll-loop.test.ts
 setup/providers/cursor.ts
 setup/providers/cursor.test.ts
 setup/providers/cursor-registration.test.ts
@@ -66,8 +67,8 @@ import './cursor.js';
 
 The container talks to Cursor through `@cursor/sdk`, not a CLI binary. Pin the exact version in the agent-runner tree (Bun, not the host pnpm workspace — `@cursor/sdk` must not enter the host lockfile). Re-running `bun add` of the same pin is a no-op. Do not run `bun update`.
 
-```nc:run effect:refresh
-cd container/agent-runner && bun add @cursor/sdk@1.0.28
+```nc:dep manager:bun cwd:container/agent-runner
+@cursor/sdk@1.0.28
 ```
 
 The version (`1.0.28`) is the canonical pin — this SKILL.md is the source of truth. It is the first release with the Bun stream-stall fix (≥ 1.0.23).
@@ -83,27 +84,13 @@ pnpm exec tsc -p container/agent-runner/tsconfig.json --noEmit
 ### 5. Validate
 
 ```nc:run effect:test
-pnpm vitest run src/providers/cursor-registration.test.ts src/providers/cursor-host-contribution.test.ts src/providers/cursor-agents-md.test.ts setup/providers/cursor-registration.test.ts setup/providers/cursor.test.ts setup/providers/install.test.ts setup/provider-auth.test.ts
+pnpm vitest run src/providers/cursor-registration.test.ts src/providers/cursor-host-contribution.test.ts src/providers/cursor-agents-md.test.ts setup/providers/cursor-registration.test.ts setup/providers/cursor.test.ts setup/provider-auth.test.ts
 ```
 ```nc:run effect:test
-cd container/agent-runner && bun test src/providers/cursor-registration.test.ts src/providers/cursor.factory.test.ts src/providers/cursor-auth.test.ts src/providers/cursor-hook.test.ts
+cd container/agent-runner && bun test src/providers/cursor-registration.test.ts src/providers/cursor.factory.test.ts src/providers/cursor-auth.test.ts src/providers/cursor-hook.test.ts src/providers/cursor.poll-loop.test.ts
 ```
 
 The registration tests import only the real barrels — they go red if a barrel line is missing, a barrel fails to evaluate, or the payload is broken. The container registration test also imports `@cursor/sdk` unmocked, so a missing package goes red.
-
-### 6. Propagate to existing per-group overlays
-
-Each agent group has a live source overlay at `data/v2-sessions/<group-id>/agent-runner-src/providers/` that **overrides the image at runtime**. This overlay is created when the group is first wired and never auto-updated by image rebuilds. Any group that already existed before this skill ran needs the new files copied in manually.
-
-```bash
-for overlay in data/v2-sessions/*/agent-runner-src/providers/; do
-  [ -d "$overlay" ] || continue
-  cp container/agent-runner/src/providers/cursor.ts "$overlay"
-  cp container/agent-runner/src/providers/cursor-hook.ts "$overlay"
-  cp container/agent-runner/src/providers/index.ts "$overlay"
-  echo "Updated: $overlay"
-done
-```
 
 ## Authenticate
 
@@ -150,7 +137,7 @@ This affects only groups created afterward. Per-group `ncl groups config update 
 
 ## Troubleshooting
 
-- **Container dies at boot, channel silent:** `grep 'Container exited non-zero' logs/nanoclaw.error.log` — the `stderrTail` carries the reason (e.g. `Unknown provider: cursor. Registered: claude` means the barrels aren't wired in the running build, or an existing group's `agent-runner-src` overlay predates this skill — re-run step 6).
+- **Container dies at boot, channel silent:** `grep 'Container exited non-zero' logs/nanoclaw.error.log` — the `stderrTail` carries the reason (e.g. `Unknown provider: cursor. Registered: claude` means the barrels aren't wired in the running build).
 - **401 after months of working:** an OAuth-minted user key expired (default 90 days). Run `pnpm exec tsx setup/index.ts --step provider-auth cursor --force`. Prefer a dashboard or service-account key for unattended installs.
 - **Auth errors mid-conversation:** the vault secret is missing or stale — run `pnpm exec tsx setup/index.ts --step provider-auth cursor --force`.
 - **`@cursor/sdk` missing inside the container:** the image predates the pin — re-run `./container/build.sh`. Do not add a Cursor CLI to `container/cli-tools.json`; the container uses the library.

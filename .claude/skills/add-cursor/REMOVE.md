@@ -36,6 +36,7 @@ rm -f src/providers/cursor.ts \
       container/agent-runner/src/providers/cursor.factory.test.ts \
       container/agent-runner/src/providers/cursor-auth.test.ts \
       container/agent-runner/src/providers/cursor-hook.test.ts \
+      container/agent-runner/src/providers/cursor.poll-loop.test.ts \
       setup/providers/cursor.ts \
       setup/providers/cursor.test.ts \
       setup/providers/cursor-registration.test.ts
@@ -53,30 +54,11 @@ cd container/agent-runner && bun remove @cursor/sdk && cd -
 
 Do **not** edit `container/cli-tools.json` — this skill never added a CLI there.
 
-## 5. Revert trunk reach-ins
-
-Delete the `cursor:` entry from `INSTALL_SKILLS` in `setup/provider-auth.ts`.
-
-Delete the `{ value: 'cursor', ... }` row from `INSTALLABLE_PROVIDERS` in `setup/auto.ts`.
-
-## 6. Overlays
-
-Remove the copied Cursor files from existing group overlays:
-
-```bash
-for overlay in data/v2-sessions/*/agent-runner-src/providers/; do
-  [ -d "$overlay" ] || continue
-  rm -f "$overlay/cursor.ts" "$overlay/cursor-hook.ts"
-done
-```
-
-Then restore each overlay's `index.ts` barrel (delete `import './cursor.js';`).
-
-## 7. Vault secret (optional)
+## 5. Vault secret (optional)
 
 The Cursor secrets in the OneCLI vault grant nothing once the provider is gone. To remove them: `onecli secrets list`, then `onecli secrets delete --id <id>` for both the `api2.cursor.sh/auth/exchange_user_api_key` and `api.cursor.com/v1/models` entries.
 
-## 8. Rebuild and verify
+## 6. Rebuild and verify
 
 ```bash
 pnpm run build

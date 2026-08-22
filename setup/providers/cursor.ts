@@ -5,8 +5,7 @@
  * branch. The only trunk reach-ins are the barrel import, an INSTALL_SKILLS
  * entry, and an INSTALLABLE_PROVIDERS picker row.
  *
- * Auth honors the v2 credential invariant — everything lands in the OneCLI
- * vault, nothing in .env, nothing in the container:
+ * Auth keeps the long-lived credential in OneCLI — nothing lands in .env:
  *   - Cursor account (the common case): a helper in the agent-runner package
  *     calls `Cursor.auth.login({ store: null })`. The SDK mints an expiring
  *     user API key and writes it straight to a mode-0600 handoff file; OneCLI
@@ -14,14 +13,15 @@
  *     vault rules use the same key: `api2.cursor.sh/auth/exchange_user_api_key`
  *     swaps it for a short-lived runtime token, while
  *     `api.cursor.com/v1/models` uses the original key for model discovery.
- *     Runtime calls bypass OneCLI so their access token passes unchanged.
+ *     Runtime calls keep using OneCLI as their proxy; the SDK sends its
+ *     short-lived access token unchanged.
  *   - API key: entered once in this local masked prompt (never chat), written
  *     to the same kind of handoff file, and stored as the same generic secret.
  *
- * Session-isolation invariant: login is a host setup step; the container only
- * sends placeholder `CURSOR_API_KEY` so OneCLI can rewrite Authorization to
- * `api2.cursor.sh`. Do not import `@cursor/sdk` from setup — the login helper
- * lives under agent-runner so the SDK stays out of the host lockfile.
+ * Session-isolation invariant: login is a host setup step; the container sends
+ * placeholder `CURSOR_API_KEY` for the exchange, then holds only the returned
+ * short-lived access token. Do not import `@cursor/sdk` from setup — the login
+ * helper lives under agent-runner so the SDK stays out of the host lockfile.
  */
 import { execFileSync, spawn } from 'child_process';
 import fs from 'fs';
@@ -302,7 +302,7 @@ export async function runCursorLoginAuth(
   setupLog.step('auth', 'success', durationMs, { PROVIDER: 'cursor', METHOD: method });
   p.log.success(
     brandBody(
-      'Cursor account connected — credentials live in your OneCLI vault, never in the container. Browser-minted keys expire after 90 days.',
+      'Cursor account connected — the long-lived credential is in your OneCLI vault; the SDK uses a short-lived runtime token inside the container. Browser-minted keys expire after 90 days.',
     ),
   );
 }

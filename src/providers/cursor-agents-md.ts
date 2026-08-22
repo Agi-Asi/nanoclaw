@@ -15,6 +15,7 @@
  * blob is visible in host logs, but it never throws — a per-spawn throw
  * rides wakeContainer's transient-retry contract and the group goes dark.
  */
+import { randomUUID } from 'crypto';
 import fs from 'fs';
 import path from 'path';
 
@@ -138,7 +139,15 @@ function renderAgentsMd(sections: AgentsMdSection[]): string {
 }
 
 function writeAtomic(filePath: string, content: string): void {
-  const tmp = `${filePath}.tmp-${process.pid}`;
-  fs.writeFileSync(tmp, content);
-  fs.renameSync(tmp, filePath);
+  const tmp = `${filePath}.tmp-${randomUUID()}`;
+  try {
+    fs.writeFileSync(tmp, content, { flag: 'wx' });
+    fs.renameSync(tmp, filePath);
+  } finally {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* renamed or never created */
+    }
+  }
 }

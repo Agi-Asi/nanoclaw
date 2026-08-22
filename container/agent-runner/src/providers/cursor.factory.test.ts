@@ -95,7 +95,7 @@ describe('mapMcpServers / stream helpers', () => {
     expect(actual).toBe(response);
   });
 
-  it('bypasses MITM only for access-token runtime calls', async () => {
+  it('does not bypass the configured proxy for Cursor requests', async () => {
     process.env.NO_PROXY = 'localhost';
     process.env.no_proxy = 'localhost';
     const observed: string[] = [];
@@ -112,30 +112,10 @@ describe('mapMcpServers / stream helpers', () => {
       method: 'POST',
       body: new Uint8Array([0, 0, 0, 0, 0]),
     });
-    await wrapped('https://api.cursor.com/v1/models');
 
-    expect(observed[0]?.split(',')).not.toContain('api2.cursor.sh');
-    expect(observed[1]?.split(',')).toContain('api2.cursor.sh');
-    expect(observed[2]?.split(',')).not.toContain('api.cursor.com');
-    expect(process.env.NO_PROXY?.split(',')).toContain('api2.cursor.sh');
-    expect(process.env.NO_PROXY?.split(',')).not.toContain('api.cursor.com');
-    expect(process.env.no_proxy).toBe(process.env.NO_PROXY);
-  });
-
-  it('restores the runtime proxy bypass when key exchange fails', async () => {
-    process.env.NO_PROXY = 'localhost';
-    const wrapped = createContentLengthFetch((async () => {
-      throw new Error('proxy failed');
-    }) as typeof fetch);
-
-    await expect(
-      wrapped('https://api2.cursor.sh/auth/exchange_user_api_key', {
-        method: 'POST',
-        body: '{}',
-      }),
-    ).rejects.toThrow('proxy failed');
-    expect(process.env.NO_PROXY?.split(',')).toContain('api2.cursor.sh');
-    expect(process.env.no_proxy).toBe(process.env.NO_PROXY);
+    expect(observed).toEqual(['localhost', 'localhost']);
+    expect(process.env.NO_PROXY).toBe('localhost');
+    expect(process.env.no_proxy).toBe('localhost');
   });
 
   it('maps NanoClaw stdio and HTTP MCP configs without dropping transport fields', () => {

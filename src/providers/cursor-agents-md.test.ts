@@ -202,4 +202,21 @@ describe('composeGroupAgentsMd', () => {
       fs.rmSync(groupDir, { recursive: true, force: true });
     }
   });
+
+  it('does not follow a pre-created temporary-file symlink', async () => {
+    const g = group('temp-symlink');
+    await createAgentGroup(g);
+    await ensureContainerConfig(g.id);
+    const groupDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cursor-agents-md-'));
+    const target = path.join(TEST_ROOT, 'host-target');
+    fs.writeFileSync(target, 'unchanged\n');
+    fs.symlinkSync(target, path.join(groupDir, `AGENTS.md.tmp-${process.pid}`));
+    try {
+      await composeGroupAgentsMd(g, groupDir);
+      expect(fs.readFileSync(target, 'utf-8')).toBe('unchanged\n');
+      expect(fs.lstatSync(path.join(groupDir, 'AGENTS.md')).isSymbolicLink()).toBe(false);
+    } finally {
+      fs.rmSync(groupDir, { recursive: true, force: true });
+    }
+  });
 });

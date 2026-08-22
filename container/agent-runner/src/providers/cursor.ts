@@ -2,11 +2,11 @@
  * Cursor SDK agent provider — local runtime inside the container.
  *
  * Talks to `@cursor/sdk` (`Agent.create` / `resume` / `send`). Continuation is
- * the Cursor `agentId`. Credentials never live here: the host passes
- * `CURSOR_API_KEY=placeholder` so the SDK emits an Authorization header and
- * OneCLI rewrites it for Cursor's key-exchange and model-discovery requests.
- * The short-lived access token returned by the exchange then goes directly to
- * later `api2.cursor.sh` runtime requests.
+ * the Cursor `agentId`. The host passes `CURSOR_API_KEY=placeholder` so the SDK
+ * emits an Authorization header and OneCLI rewrites it for Cursor's
+ * key-exchange and model-discovery requests. The SDK holds the short-lived
+ * access token returned by the exchange, but all later traffic still uses the
+ * configured proxy.
  */
 import fs from 'fs';
 import os from 'os';
@@ -29,10 +29,6 @@ import type {
 
 const CONTENT_LENGTH_FETCH = Symbol.for('nanoclaw.cursor.content-length-fetch');
 type MarkedFetch = typeof fetch & { [CONTENT_LENGTH_FETCH]?: boolean };
-// Not public SDK API — these hosts/paths are what @cursor/sdk@1.0.28 uses for
-// key-exchange. Re-verify when bumping the pin; a miss stalls OneCLI MITM.
-const CURSOR_API_HOST = 'api2.cursor.sh';
-const CURSOR_EXCHANGE_PATH = '/auth/exchange_user_api_key';
 
 function knownBodyLength(body: BodyInit | null | undefined): number | null {
   if (body == null) return null;
@@ -44,56 +40,20 @@ function knownBodyLength(body: BodyInit | null | undefined): number | null {
   return null;
 }
 
-function requestUrl(input: RequestInfo | URL): URL | null {
-  try {
-    return new URL(input instanceof Request ? input.url : input.toString());
-  } catch {
-    return null;
-  }
-}
-
-function setNoProxyHost(host: string, enabled: boolean): void {
-  const raw = process.env.NO_PROXY ?? process.env.no_proxy ?? '';
-  const entries = raw
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .filter((entry) => entry !== host);
-  if (enabled) entries.push(host);
-  const value = entries.join(',');
-  process.env.NO_PROXY = value;
-  process.env.no_proxy = value;
-}
-
 /**
- * Keep API-key exchange and model discovery behind OneCLI, then bypass its MITM
- * for runtime calls made with Cursor's short-lived access token. Bun sends
- * Connect's protobuf bodies as chunked streams, which OneCLI cannot currently
- * forward without stalling.
- * The original user API key remains vault-only: this process has only the
- * placeholder used on the exchange and the access token returned by Cursor.
- *
- * Supplying known body lengths also avoids chunking the exchange itself.
+ * Keep all Cursor traffic behind the configured proxy. Supplying known body
+ * lengths prevents Bun from sending Connect protobuf bodies as chunked streams,
+ * which OneCLI cannot currently forward without stalling.
  */
 export function createContentLengthFetch(fetchImpl: typeof fetch): typeof fetch {
   const wrapped = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    const target = requestUrl(input);
-    const isCursorApi = target?.hostname === CURSOR_API_HOST;
-    const isExchange = isCursorApi && target.pathname === CURSOR_EXCHANGE_PATH;
-    if (isCursorApi) setNoProxyHost(CURSOR_API_HOST, !isExchange);
-
     const length = knownBodyLength(init?.body);
     const nextInit = length == null ? init : { ...init, headers: new Headers(init?.headers) };
     if (length != null) {
       const headers = (nextInit as RequestInit).headers as Headers;
       if (!headers.has('content-length')) headers.set('content-length', String(length));
     }
-
-    try {
-      return await fetchImpl(input, nextInit);
-    } finally {
-      if (isExchange) setNoProxyHost(CURSOR_API_HOST, true);
-    }
+    return fetchImpl(input, nextInit);
   }) as MarkedFetch;
   wrapped[CONTENT_LENGTH_FETCH] = true;
   return wrapped;
@@ -125,11 +85,7 @@ export const CURSOR_API_KEY_PLACEHOLDER = 'cursor_placeholder_nanoclaw';
  * only to the main loop — subagents keep their own toolset and could still
  * call `askQuestion`.
  */
-export const CURSOR_DISALLOWED_TOOLS: Array<'askQuestion' | 'await' | 'task'> = [
-  'askQuestion',
-  'await',
-  'task',
-];
+export const CURSOR_DISALLOWED_TOOLS: Array<'askQuestion' | 'await' | 'task'> = ['askQuestion', 'await', 'task'];
 
 const DEFAULT_MODEL = 'composer-2.5';
 const STALE_SESSION_RE = /agent not found|unknown agent|no conversation|session.*not found/i;

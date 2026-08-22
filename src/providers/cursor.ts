@@ -15,13 +15,12 @@
  *     persistent across sessions so the local agent SQLite/JSONL store
  *     survives respawns.
  *
- * Credentials: NONE here as a real secret. The container only receives
- * `CURSOR_API_KEY=placeholder` so `@cursor/sdk` emits an Authorization
- * header; OneCLI rewrites it for the SDK's key-exchange and model-discovery
- * endpoints. Cursor's short-lived access token then travels directly to its
- * runtime endpoint so the gateway neither rewrites nor stalls it. Whether the
- * vaulted value came from Cursor-account OAuth or a pasted dashboard key is
- * invisible inside the container.
+ * The long-lived credential stays in OneCLI. The container receives
+ * `CURSOR_API_KEY=placeholder` so `@cursor/sdk` emits an Authorization header
+ * that OneCLI rewrites for key exchange and model discovery. The SDK holds the
+ * exchanged short-lived access token in process and sends it through the same
+ * configured proxy. Whether the vaulted value came from Cursor-account OAuth
+ * or a pasted dashboard key is invisible inside the container.
  */
 import fs from 'fs';
 import path from 'path';

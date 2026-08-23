@@ -29,6 +29,8 @@ src/channels/telegram-pairing.ts
 src/channels/telegram-pairing.test.ts
 src/channels/telegram-registration.test.ts
 src/channels/telegram-connect-group.test.ts
+src/channels/telegram-slash.test.ts
+src/channels/telegram-outbound.test.ts
 ```
 
 ### 2. Register the adapter
@@ -56,7 +58,7 @@ clean-upstream rebuild). The pairing handshake below spawns this step:
 Pinned to an exact version — the supply-chain policy rejects ranges and `latest`:
 
 ```nc:dep
-@chat-adapter/telegram@4.29.0
+@chat-adapter/telegram@4.32.0
 ```
 
 ### 5. Build and validate
@@ -68,7 +70,7 @@ the dependency is installed. Then run the focused tests.
 pnpm run build
 ```
 ```nc:run effect:test
-pnpm exec vitest run src/channels/telegram-registration.test.ts src/channels/telegram-connect-group.test.ts
+pnpm exec vitest run src/channels/telegram
 ```
 
 `telegram-registration.test.ts` imports the real channel barrel and asserts the

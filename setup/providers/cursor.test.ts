@@ -732,7 +732,8 @@ describe('trunk reach-ins', () => {
   it('ships the install skill used by fresh setup and standalone provider-auth', () => {
     const skill = fs.readFileSync(path.join(process.cwd(), '.claude', 'skills', 'add-cursor', 'SKILL.md'), 'utf-8');
     expect(skill).toContain('nc:copy from-branch:providers');
-    expect(skill).toContain('bun add @cursor/sdk@1.0.28');
+    expect(skill).toContain('nc:dep manager:bun cwd:container/agent-runner');
+    expect(skill).toContain('@cursor/sdk@1.0.28');
     expect(skill).toContain('--step provider-auth cursor');
   });
 

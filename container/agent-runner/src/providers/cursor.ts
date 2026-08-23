@@ -8,6 +8,7 @@
  * access token returned by the exchange, but all later traffic still uses the
  * configured proxy.
  */
+import { randomUUID } from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -90,8 +91,6 @@ export const CURSOR_DISALLOWED_TOOLS: Array<'askQuestion' | 'await' | 'task'> = 
 const DEFAULT_MODEL = 'composer-2.5';
 const STALE_SESSION_RE = /agent not found|unknown agent|no conversation|session.*not found/i;
 const ACTIVE_RUN_RE = /already has (?:an )?active run/i;
-const STORE_ROTATE_BYTES = 50 * 1024 * 1024;
-const STORE_ROTATION_MARKER = '.nanoclaw-rotation-bytes';
 const MEMORY_HOOK_COMMAND = 'bun /app/src/providers/cursor-hook.ts';
 
 /**
@@ -178,52 +177,27 @@ export async function* waitForRunWithActivity(
   }
 }
 
-function dirSizeBytes(root: string): number {
-  let total = 0;
-  const walk = (dir: string): void => {
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        walk(full);
-      } else if (entry.isFile()) {
-        try {
-          total += fs.statSync(full).size;
-        } catch {
-          /* skip unreadable */
-        }
-      }
-    }
-  };
-  walk(root);
-  return total;
-}
-
 interface CursorHooksDocument {
   version?: unknown;
   hooks?: Record<string, unknown>;
   [key: string]: unknown;
 }
 
-function readHooksDocument(filePath: string): CursorHooksDocument {
+function readHooksDocument(filePath: string): CursorHooksDocument | null {
   if (!fs.existsSync(filePath)) return {};
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as unknown;
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as CursorHooksDocument;
-    log(`Ignoring non-object Cursor hooks document at ${filePath}`);
+    log(`Leaving non-object Cursor hooks document unchanged at ${filePath}`);
   } catch (err) {
-    log(`Ignoring malformed Cursor hooks document at ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+    log(`Leaving malformed Cursor hooks document unchanged at ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
   }
-  return {};
+  return null;
 }
 
 function mergeMemoryHook(filePath: string): void {
   const payload = readHooksDocument(filePath);
+  if (!payload) return;
   const hooks =
     payload.hooks && typeof payload.hooks === 'object' && !Array.isArray(payload.hooks) ? payload.hooks : {};
   const addHook = (name: string, command: string): void => {
@@ -244,7 +218,13 @@ function mergeMemoryHook(filePath: string): void {
   addHook('preCompact', `${MEMORY_HOOK_COMMAND} --compact`);
   payload.version = 1;
   payload.hooks = hooks;
-  fs.writeFileSync(filePath, JSON.stringify(payload, null, 2) + '\n');
+  const tempPath = `${filePath}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tempPath, JSON.stringify(payload, null, 2) + '\n', { flag: 'wx' });
+    fs.renameSync(tempPath, filePath);
+  } finally {
+    fs.rmSync(tempPath, { force: true });
+  }
 }
 
 function writeMemoryHooks(): void {
@@ -320,29 +300,6 @@ export class CursorProvider implements AgentProvider {
     return STALE_SESSION_RE.test(msg);
   }
 
-  maybeRotateContinuation(_continuation: string): string | null {
-    const storeDir = cursorHome();
-    if (!fs.existsSync(storeDir)) return null;
-    const size = dirSizeBytes(storeDir);
-    const markerPath = path.join(storeDir, STORE_ROTATION_MARKER);
-    let lastRotationSize = 0;
-    try {
-      lastRotationSize = Number.parseInt(fs.readFileSync(markerPath, 'utf-8'), 10);
-      if (!Number.isFinite(lastRotationSize) || lastRotationSize < 0) lastRotationSize = 0;
-    } catch {
-      /* first rotation */
-    }
-
-    if (size < lastRotationSize) {
-      fs.writeFileSync(markerPath, String(size));
-      return null;
-    }
-    const growth = size - lastRotationSize;
-    if (growth <= STORE_ROTATE_BYTES) return null;
-    fs.writeFileSync(markerPath, String(size));
-    return `cursor store grew ${(growth / 1_048_576).toFixed(1)}MB since its last rotation > ${(STORE_ROTATE_BYTES / 1_048_576).toFixed(0)}MB cap`;
-  }
-
   onExchangeComplete(exchange: ProviderExchange): void {
     archiveExchange(exchange, this.assistantName);
   }
@@ -384,10 +341,10 @@ export class CursorProvider implements AgentProvider {
       if (input.systemContext?.instructions) parts.push(input.systemContext.instructions);
       // Cursor's sessionStart hook is documented as fire-and-forget; live runs
       // confirm additional_context does not land in the model. Prepend the
-      // shared memory index on the first send of each query (create or resume)
-      // so startup/clear/container-wake still get it. Follow-up pushes skip it.
+      // shared memory index on the first send of a new session. Resumes already
+      // have that context, and follow-up pushes skip it.
       if (!injectedMemory) {
-        const memory = memoryContextForSessionStart('startup', input.cwd);
+        const memory = memoryContextForSessionStart(input.continuation ? 'resume' : 'startup', input.cwd);
         if (memory) parts.push(memory);
         injectedMemory = true;
       }

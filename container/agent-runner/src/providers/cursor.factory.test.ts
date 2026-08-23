@@ -247,17 +247,14 @@ describe('CursorProvider', () => {
     }
   });
 
-  it('repairs malformed Cursor hook documents instead of blocking the provider', () => {
+  it('leaves malformed Cursor hook documents unchanged', () => {
     const projectCursorDir = path.join(agentDir, '.cursor');
     fs.mkdirSync(projectCursorDir, { recursive: true });
     fs.writeFileSync(path.join(projectCursorDir, 'hooks.json'), '{broken');
 
     const provider = new CursorProvider();
     expect(() => provider.registerMemorySessionHook(MEMORY_SESSION_HOOK)).not.toThrow();
-    const repaired = JSON.parse(fs.readFileSync(path.join(projectCursorDir, 'hooks.json'), 'utf-8')) as {
-      hooks: { sessionStart: Array<{ command: string }> };
-    };
-    expect(repaired.hooks.sessionStart[0]?.command).toContain('cursor-hook.ts');
+    expect(fs.readFileSync(path.join(projectCursorDir, 'hooks.json'), 'utf-8')).toBe('{broken');
   });
 
   it('treats AgentNotFoundError as an invalid session', () => {
@@ -266,18 +263,6 @@ describe('CursorProvider', () => {
     expect(provider.isSessionInvalid(new Error('no conversation'))).toBe(true);
     expect(provider.isSessionInvalid(new Error('model not found'))).toBe(false);
     expect(provider.isSessionInvalid(new Error('rate limited'))).toBe(false);
-  });
-
-  it('rotates once per size-cap growth interval instead of rotating every new continuation', () => {
-    const provider = new CursorProvider();
-    const store = path.join(homeDir, '.cursor');
-    fs.mkdirSync(store, { recursive: true });
-    fs.writeFileSync(path.join(store, 'big.bin'), Buffer.alloc(51 * 1024 * 1024));
-    expect(provider.maybeRotateContinuation('agent-1')).toMatch(/50MB cap/);
-    expect(provider.maybeRotateContinuation('agent-2')).toBeNull();
-
-    fs.writeFileSync(path.join(store, 'more.bin'), Buffer.alloc(51 * 1024 * 1024));
-    expect(provider.maybeRotateContinuation('agent-2')).toMatch(/50MB cap/);
   });
 
   it('archives completed exchanges as markdown', () => {
@@ -373,7 +358,7 @@ describe('CursorProvider', () => {
       const events = [];
       for await (const event of query.events) events.push(event);
       expect(sent[0]).toContain('Be brief.');
-      expect(sent[0]).toContain('factory-memory-sentinel');
+      expect(sent[0]).not.toContain('factory-memory-sentinel');
       expect(sent[0]).toContain('follow-up');
       expect(sent[1]).toBe('Be brief.\n\nfollow-up while active');
       expect(sent[1]).not.toContain('factory-memory-sentinel');
@@ -511,7 +496,7 @@ describe('CursorProvider', () => {
       expect(sends).toHaveLength(2);
       expect(sends[0]?.force).toBeUndefined();
       expect(sends[1]?.force).toBe(true);
-      expect(sends[0]?.prompt).toContain('factory-memory-sentinel');
+      expect(sends[0]?.prompt).not.toContain('factory-memory-sentinel');
       expect(sends[0]?.prompt).toContain('continue');
       expect(sends[1]?.prompt).toBe(sends[0]?.prompt);
       expect(events.at(-1)).toEqual({ type: 'result', text: 'recovered' });

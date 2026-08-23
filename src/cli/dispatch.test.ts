@@ -517,7 +517,7 @@ describe('CLI scope enforcement', () => {
 
     expect(approvalState.wiringUpdates).toHaveLength(state === 'current' ? 1 : 0);
     expect(notify).toHaveBeenCalledWith(
-      expect.stringContaining(state === 'current' ? 'approved and executed' : 'failed'),
+      expect.stringContaining(state === 'current' ? 'approved by an admin and the command ran' : 'failed'),
     );
   });
 
@@ -637,6 +637,28 @@ describe('CLI scope enforcement', () => {
 
     expect(approvalState.observedContexts).toEqual([ctx]);
     expect(approvalState.requestApproval).toHaveBeenCalledTimes(1);
+  });
+
+  it('the approval card renders a JSON arg as an indented block, not escape soup', async () => {
+    mockGetContainerConfig.mockReturnValue({ cli_scope: 'group' });
+    mockGetSession.mockReturnValue({ id: 's1', agent_group_id: 'g1', messaging_group_id: 'mg1' });
+    mockGetAgentGroup.mockReturnValue({ id: 'g1', name: 'Group One' });
+
+    await dispatch(
+      {
+        id: '1',
+        command: 'approval-context-command',
+        args: { config: JSON.stringify({ app: { image: 'traefik/whoami:v1.10.1' } }) },
+      },
+      agentCtx(),
+    );
+
+    const request = approvalState.requestApproval.mock.calls[0][0] as { title: string; question: string };
+    expect(request.title).toBe('CLI: approval-context-command');
+    expect(request.question).toContain('Agent "Group One" wants to run:');
+    expect(request.question).toContain('ncl approval-context-command');
+    expect(request.question).toContain('  --config\n    {\n      "app": {');
+    expect(request.question).not.toContain('\\"');
   });
 
   // --- Grant-carrying replay (the `approved: true` boolean no longer exists) ---

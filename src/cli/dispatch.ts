@@ -19,6 +19,7 @@ import { getSession } from '../db/sessions.js';
 import { guard, type GuardActor } from '../guard/index.js';
 import { registerApprovalHandler, requestApproval } from '../modules/approvals/index.js';
 import type { PendingApproval } from '../types.js';
+import { cliApprovalExecuted, cliApprovalFailed, cliApprovalQuestion } from './approval-render.js';
 import type { CallerContext, ErrorCode, RequestFrame, ResponseFrame } from './frame.js';
 import { localizeIsoTimestamps } from './format.js';
 import { getResource } from './crud.js';
@@ -149,17 +150,13 @@ export async function dispatch(
     const agentGroup = await getAgentGroup(ctx.agentGroupId);
     const agentName = agentGroup?.name ?? ctx.agentGroupId;
 
-    const argSummary = Object.entries(req.args)
-      .map(([k, v]) => `--${k} ${v}`)
-      .join(' ');
-
     await requestApproval({
       session,
       agentName,
       action: 'cli_command',
       payload: { frame: { id: req.id, command: req.command, args: req.args }, callerContext: ctx },
       title: `CLI: ${req.command}`,
-      question: `Agent "${agentName}" wants to run:\n\`ncl ${req.command}${argSummary ? ' ' + argSummary : ''}\``,
+      question: cliApprovalQuestion(agentName, req.command, req.args),
     });
 
     return err(req.id, 'approval-pending', 'Approval request sent to admin. You will be notified of the result.');
@@ -235,11 +232,13 @@ registerApprovalHandler('cli_command', async ({ payload, approval, notify }) => 
   const response = await dispatch(frame, callerContext, { grant: approval });
 
   if (response.ok) {
+    // Prefer the command's own human rendering — the same text a CLI caller
+    // sees — over a raw JSON dump of the row.
     const localized = localizeIsoTimestamps(response.data);
-    const data = typeof localized === 'string' ? localized : JSON.stringify(localized, null, 2);
-    await notify(`Your \`ncl ${frame.command}\` request was approved and executed.\n\n${data}`);
+    const result = response.human ?? (typeof localized === 'string' ? localized : JSON.stringify(localized, null, 2));
+    await notify(cliApprovalExecuted(frame.command, result));
   } else {
-    await notify(`Your \`ncl ${frame.command}\` request was approved but failed: ${response.error.message}`);
+    await notify(cliApprovalFailed(frame.command, response.error.message));
   }
 });
 

@@ -480,9 +480,27 @@ export async function buildMounts(
   const sessDir = sessionDir(agentGroup.id, session.id);
   const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
   const scope = agentGroup.id;
+  const attachmentMounts = await getAgentMailbox().attachmentMounts({
+    agentGroupId: agentGroup.id,
+    sessionId: session.id,
+  });
 
   // Session workspace: mailbox-selected state plus outbox and heartbeat files.
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false, mountClass: 'group-state', scope });
+  mounts.push({
+    hostPath: attachmentMounts.inboxHostPath,
+    containerPath: '/workspace/inbox',
+    readonly: false,
+    mountClass: 'group-state',
+    scope,
+  });
+  mounts.push({
+    hostPath: attachmentMounts.outboxHostPath,
+    containerPath: '/workspace/outbox',
+    readonly: false,
+    mountClass: 'group-state',
+    scope,
+  });
   mounts.push({
     hostPath: sessionContextPath(agentGroup.id, session.id),
     containerPath: '/app/.nanoclaw-session.json',

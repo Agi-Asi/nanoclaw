@@ -221,6 +221,11 @@ async function drainSession(session: Session): Promise<void> {
       await withExistingMailboxSession(agentGroup.id, session.id, (mailbox) =>
         mailbox.markDelivered(msg.id, platformMsgId ?? null),
       );
+      try {
+        await clearOutbox(agentGroup.id, session.id, msg.id);
+      } catch (err) {
+        log.warn('Delivered outbox cleanup failed', { messageId: msg.id, sessionId: session.id, err });
+      }
       const firstDelivery = delivered.size === 0;
       delivered.add(msg.id);
       deliveryAttempts.delete(msg.id);
@@ -449,7 +454,7 @@ async function deliverMessage(
   // extractAttachmentFiles) — delivery just hands buffers to the adapter.
   const files =
     Array.isArray(content.files) && content.files.length > 0
-      ? readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
+      ? await readOutboxFiles(session.agent_group_id, session.id, msg.id, content.files as string[])
       : undefined;
 
   const platformMsgId = await deliveryAdapter.deliver(
@@ -468,8 +473,6 @@ async function deliverMessage(
     platformMsgId,
     fileCount: files?.length,
   });
-
-  clearOutbox(session.agent_group_id, session.id, msg.id);
 
   return platformMsgId;
 }

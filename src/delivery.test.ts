@@ -77,6 +77,19 @@ function insertOutbound(agentGroupId: string, sessionId: string, msgId: string):
   db.close();
 }
 
+function insertOutboundFile(agentGroupId: string, sessionId: string, msgId: string): string {
+  const db = new Database(outboundDbPath(agentGroupId, sessionId));
+  db.prepare(
+    `INSERT INTO messages_out (id, timestamp, kind, platform_id, channel_type, content)
+     VALUES (?, datetime('now'), 'chat', 'telegram:123', 'telegram', ?)`,
+  ).run(msgId, JSON.stringify({ text: 'file', files: ['result.txt'] }));
+  db.close();
+  const outbox = `${TEST_DIR}/v2-sessions/${agentGroupId}/${sessionId}/outbox/${msgId}`;
+  fs.mkdirSync(outbox, { recursive: true });
+  fs.writeFileSync(`${outbox}/result.txt`, 'result');
+  return outbox;
+}
+
 beforeEach(async () => {
   if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
   fs.mkdirSync(TEST_DIR, { recursive: true });
@@ -182,6 +195,29 @@ describe('deliverSessionMessages — concurrent invocations', () => {
     await deliverSessionMessages(session);
 
     expect(callCount).toBe(1);
+  });
+});
+
+describe('deliverSessionMessages — attachment cleanup order', () => {
+  it('keeps outbox bytes when the durable delivery marker fails', async () => {
+    await seedAgentAndChannel();
+    const { session } = await resolveSession('ag-1', 'mg-1', null, 'shared');
+    const outbox = insertOutboundFile('ag-1', session.id, 'out-marker-fail');
+    setDeliveryAdapter({
+      async deliver() {
+        return 'platform-file';
+      },
+    });
+
+    const mailbox = getAgentMailbox();
+    const originalSession = mailbox.session.bind(mailbox);
+    const sessionSpy = vi.spyOn(mailbox, 'session');
+    sessionSpy.mockImplementationOnce(originalSession);
+    sessionSpy.mockRejectedValueOnce(new Error('marker failed'));
+
+    await deliverSessionMessages(session);
+    expect(fs.readFileSync(`${outbox}/result.txt`, 'utf8')).toBe('result');
+    sessionSpy.mockRestore();
   });
 });
 

@@ -4,6 +4,8 @@ All notable changes to NanoClaw will be documented in this file.
 
 ## [Unreleased]
 
+- [BREAKING] **Custom host `AgentMailbox` implementations must provide `attachmentMounts(key)`.** The built-in SQLite mailbox keeps the same `inbox/` and `outbox/` layout; alternate mailboxes must return their canonical host paths, provision both directories, and fail closed when the backing mount is unavailable. **Migration:** follow [the agent mailbox seam migration guide](docs/agent-mailbox-seam-migration.md#implement-attachment-mounts) to detect custom implementations, add the method, verify mount modes and attachment delivery, or roll back.
+
 ## [2.3.0] - 2026-08-24
 
 - [BREAKING] **A new Slack experience — per-agent provisioned Slack apps, agent spawning from Slack, and UX improvements — is available to classic single-bot Slack installs.** Classic Slack keeps working unchanged; this gate asks for a decision, not a forced migration. New installs and non-Slack installs are unaffected. **Migration:** run `/migrate-slack-agents` — it detects classic state (exits cleanly otherwise) and either walks the upgrade or records the choice to stay on classic; both outcomes satisfy this requirement.

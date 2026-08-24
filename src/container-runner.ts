@@ -490,15 +490,15 @@ export async function buildMounts(
   mounts.push({
     hostPath: attachmentMounts.inboxHostPath,
     containerPath: '/workspace/inbox',
-    readonly: false,
-    mountClass: 'group-state',
+    readonly: true,
+    mountClass: 'mailbox-attachment',
     scope,
   });
   mounts.push({
     hostPath: attachmentMounts.outboxHostPath,
     containerPath: '/workspace/outbox',
     readonly: false,
-    mountClass: 'group-state',
+    mountClass: 'mailbox-attachment',
     scope,
   });
   mounts.push({

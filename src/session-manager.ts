@@ -557,10 +557,10 @@ export async function clearOutbox(agentGroupId: string, sessionId: string, messa
     return;
   }
 
-  const { outboxHostPath } = await getAgentMailbox().attachmentMounts(mailboxKey(agentGroupId, sessionId));
-  const outboxDir = path.join(outboxHostPath, messageId);
-  if (!fs.existsSync(outboxDir)) return;
   try {
+    const { outboxHostPath } = await getAgentMailbox().attachmentMounts(mailboxKey(agentGroupId, sessionId));
+    const outboxDir = path.join(outboxHostPath, messageId);
+    if (!fs.existsSync(outboxDir)) return;
     const stat = fs.lstatSync(outboxDir);
     if (!stat.isDirectory() || stat.isSymbolicLink()) {
       log.warn('Rejecting unsafe outbox cleanup directory', { messageId, outboxDir });

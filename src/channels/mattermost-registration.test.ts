@@ -12,7 +12,7 @@
  *
  * Importing the barrel is safe: registration is a pure top-level call, and mattermost.ts
  * builds the SDK adapter / bridge only inside its factory (invoked at host startup),
- * never at import. It does require the adapter package to be installed, which holds
+ * never at import. It does require `@nanoco/chat-adapter-mattermost` to be installed, which holds
  * in a composed install: the skill's `pnpm install` step runs before this test.
  *
  * Note on the Chat SDK family: mattermost.ts also consumes a load-bearing *core* API —

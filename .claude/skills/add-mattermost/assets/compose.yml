@@ -1,0 +1,47 @@
+name: nanoclaw-mattermost
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mmuser
+      POSTGRES_PASSWORD: local_mattermost_only
+      POSTGRES_DB: mattermost
+    volumes:
+      - database:/var/lib/postgresql/data
+
+  mattermost:
+    image: mattermost/mattermost-team-edition:latest
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: "postgres://mmuser:local_mattermost_only@postgres:5432/mattermost?sslmode=disable&connect_timeout=10"
+      MM_SERVICESETTINGS_SITEURL: "http://localhost:8065"
+      MM_SERVICESETTINGS_ALLOWCORSFROM: "http://localhost:8065 http://127.0.0.1:8065"
+      MM_SERVICESETTINGS_ENABLEBOTACCOUNTCREATION: "true"
+      MM_SERVICESETTINGS_ENABLEUSERACCESSTOKENS: "true"
+      MM_TEAMSETTINGS_ENABLEOPENSERVER: "true"
+      MM_SERVICESETTINGS_ALLOWEDUNTRUSTEDINTERNALCONNECTIONS: "host.docker.internal"
+    volumes:
+      - data:/mattermost/data
+      - config:/mattermost/config
+      - logs:/mattermost/logs
+      - plugins:/mattermost/plugins
+      - client-plugins:/mattermost/client/plugins
+      - bleve:/mattermost/bleve-indexes
+    ports:
+      - "8065:8065"
+
+volumes:
+  database:
+  data:
+  config:
+  logs:
+  plugins:
+  client-plugins:
+  bleve:

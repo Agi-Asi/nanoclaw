@@ -1,6 +1,6 @@
 ---
 name: add-mattermost
-description: Add a self-hosted or cloud Mattermost bot channel through the Chat SDK bridge.
+description: Add a self-hosted or cloud Mattermost bot channel through the Chat SDK bridge, reusing a local server when available and offering an evaluation server when none exists.
 ---
 
 # Add Mattermost Channel
@@ -8,6 +8,34 @@ description: Add a self-hosted or cloud Mattermost bot channel through the Chat 
 Adds Mattermost DMs, channels, threads, files, reactions, and interactive
 approval cards. Messages arrive over Mattermost's WebSocket; card clicks return
 to NanoClaw over an authenticated HTTP callback. Every step is safe to re-run.
+
+## Discover the server first
+
+Do this before installing the adapter or asking for a URL. The goal is to
+reuse a healthy Mattermost the user already has and establish one canonical
+base URL.
+
+1. Check an existing `MATTERMOST_BASE_URL` in the current environment and
+   NanoClaw env/config files. Do not print tokens or dump whole env files.
+2. Probe likely local URLs, at least `http://localhost:8065` and
+   `http://127.0.0.1:8065`, using `GET /api/v4/system/ping`. A listening port
+   alone is not evidence that the service is Mattermost.
+3. Inspect Docker/Compose for Mattermost containers. If a matching container
+   exists but is stopped, offer to start it; do not start or recreate it
+   without the user's approval.
+4. If one healthy server is found, tell the user and use it. If multiple
+   distinct servers are found, ask which one to use. Treat localhost and
+   127.0.0.1 endpoints for the same container as one server and prefer the
+   hostname in its configured Site URL; otherwise prefer `localhost`.
+5. If nothing local is found, ask whether the user has a remote Mattermost.
+   If not, offer the local evaluation installation in
+   [LOCAL_SERVER.md](LOCAL_SERVER.md). Read that file only for local server
+   discovery, repair, or installation.
+
+Set `MATTERMOST_BASE_URL` to the chosen canonical URL (scheme included, no
+trailing slash), then use that exact hostname in browser/Desktop setup. Do not
+silently install Mattermost: it runs containers, binds a port, and persists
+data, so show what will be created and get approval first.
 
 ## Apply
 
@@ -181,6 +209,17 @@ changes are observed, but restarting NanoClaw forces a fresh subscription.
 **A new channel gets no immediate reply.** Check the owner's DM with the bot.
 NanoClaw holds the first message behind a channel-approval card and deduplicates
 later mentions until that card is resolved.
+
+**Desktop messages appear only after a manual refresh.** This is usually the
+Desktop client's WebSocket origin being rejected. Keep the Desktop server URL,
+`MATTERMOST_BASE_URL`, and Mattermost `ServiceSettings.SiteURL` on the same
+canonical hostname. Check server logs for `request origin not allowed`, and
+verify `/api/v4/websocket` returns `101 Switching Protocols` for that Origin.
+For a local server that genuinely needs both hostnames, persist a space-separated
+`ServiceSettings.AllowCorsFrom` containing `http://localhost:8065` and
+`http://127.0.0.1:8065`; do not use `*`. Preview images may regenerate
+`config.json` on restart, so make the setting part of container startup rather
+than relying on an in-container edit.
 
 **Cards render but clicks do nothing.** From the Mattermost server, POST to the
 callback URL. A `401` proves the path reaches NanoClaw; timeout or refusal means

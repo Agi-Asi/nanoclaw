@@ -24,7 +24,8 @@
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:mattermost-live": "MATTERMOST_LAB_REQUIRED=1 vitest run src/channels/mattermost-live.test.ts"
   },
   "dependencies": {
     "@beeper/chat-adapter-matrix": "^0.2.0",

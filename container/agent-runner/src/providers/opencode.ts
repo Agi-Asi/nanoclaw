@@ -27,6 +27,13 @@ const MODEL_INPUT_MODALITIES = ['text', 'audio', 'image', 'video', 'pdf'] as con
 
 const SESSION_STATUS_RETRY_ERROR_AFTER = 3;
 
+/**
+ * The agent workspace: the group directory the host mounts RW, holding the
+ * composed project document, the group's memory, and its working files. Both
+ * the server's cwd and every instruction path resolve here.
+ */
+const AGENT_DIR = '/workspace/agent';
+
 /** Stale / dead OpenCode session heuristics (complement Claude-centric host patterns). */
 const STALE_SESSION_RE =
   /no conversation found|ENOENT.*\.jsonl|session.*not found|NotFoundError|connection reset|ECONNRESET|404|event timeout/i;
@@ -66,6 +73,13 @@ function spawnOpencodeServer(config: Record<string, unknown>, timeoutMs = 10_000
     const hostname = '127.0.0.1';
     const port = 4096;
     const proc = spawn('opencode', ['serve', `--hostname=${hostname}`, `--port=${port}`], {
+      // `opencode serve` has no --directory flag: the server's project
+      // directory IS its cwd, and both native project-doc discovery and the
+      // root that read/glob/grep/bash resolve against follow from it.
+      // Inherited, that was the image WORKDIR (/workspace/group) — a sibling
+      // of the agent workspace, so the tools ran in an empty directory.
+      // Codex passes the same directory explicitly; OpenCode had no equivalent.
+      cwd: AGENT_DIR,
       env: {
         ...process.env,
         OPENCODE_CONFIG_CONTENT: JSON.stringify(config),
@@ -334,10 +348,12 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
 
   const mcp = mcpServersToOpenCodeConfig(options.mcpServers);
 
-  // Load the shared base + per-group fragments through OpenCode's native
-  // instructions pipeline (session/instruction.ts). Absolute paths with
-  // globs are supported. Files are read raw — `@./...` includes are NOT expanded
-  // by OpenCode, so point at the concrete files, not at composed CLAUDE.md.
+  // Named explicitly rather than left to the cwd walk: OpenCode takes the
+  // FIRST of AGENTS.md, CLAUDE.md, CONTEXT.md it finds and stops, so a stale
+  // AGENTS.md from a group that once ran codex would shadow the document the
+  // host just composed. Listed here it loads either way (resolved paths
+  // dedupe against the walk). CLAUDE.local.md is in no walk target list, so
+  // this array is the group memory file's only channel.
   //
   // Memory deliberately does NOT ride this array. OpenCode's instruction
   // pipeline calls instruction.system() on every model request and rereads
@@ -345,11 +361,7 @@ export function buildOpenCodeConfig(options: ProviderOptions): Record<string, un
   // unrendered) on every request instead of following the shared
   // startup/clear/compact lifecycle. Memory is delivered by the registered
   // memory session hook instead — see createMemoryLifecycle below.
-  const instructions = [
-    '/app/CLAUDE.md',
-    '/workspace/agent/.claude-fragments/*.md',
-    '/workspace/agent/CLAUDE.local.md',
-  ];
+  const instructions = [`${AGENT_DIR}/CLAUDE.md`, `${AGENT_DIR}/CLAUDE.local.md`];
 
   return {
     ...(model ? { model } : {}),

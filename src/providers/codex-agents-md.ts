@@ -15,7 +15,7 @@
  */
 import path from 'path';
 
-import { composeProjectDoc, type ProjectDocSpec } from '../project-doc-compose.js';
+import { composeGroupProjectDoc, type ProjectDocSpec } from '../project-doc-compose.js';
 import type { AgentGroup } from '../types.js';
 
 export const CODEX_PROJECT_DOC_MAX_BYTES = 32 * 1024;
@@ -47,5 +47,5 @@ const CODEX_PROJECT_DOC: ProjectDocSpec = {
 };
 
 export function composeGroupAgentsMd(group: AgentGroup, groupDir: string): Promise<void> {
-  return composeProjectDoc(group, groupDir, CODEX_PROJECT_DOC);
+  return composeGroupProjectDoc(group, groupDir, CODEX_PROJECT_DOC);
 }

@@ -212,10 +212,13 @@ describe('buildOpenCodeConfig instructions', () => {
     expect(config.instructions).not.toContain('/workspace/agent/memory/system/definition.md');
   });
 
-  it('still loads the base and per-group instruction files', () => {
+  // The array named `/app/CLAUDE.md` and `.claude-fragments/*.md` until the
+  // host stopped mounting either and inlined every instruction source into the
+  // composed project document instead. OpenCode reads no other file at
+  // startup, so a stale entry here fails silently: the agent spawns with no
+  // capability instructions and nothing logs it.
+  it('loads the composed project document and the group memory file, and nothing that no longer exists', () => {
     const config = buildOpenCodeConfig({});
-    expect(config.instructions).toContain('/app/CLAUDE.md');
-    expect(config.instructions).toContain('/workspace/agent/.claude-fragments/*.md');
-    expect(config.instructions).toContain('/workspace/agent/CLAUDE.local.md');
+    expect(config.instructions).toEqual(['/workspace/agent/CLAUDE.md', '/workspace/agent/CLAUDE.local.md']);
   });
 });

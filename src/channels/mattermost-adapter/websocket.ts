@@ -108,13 +108,17 @@ export class MattermostSocket {
   private socket: WebSocket | undefined;
 
   constructor(options: MattermostSocketOptions) {
+    // The defaults must survive an own key holding `undefined` — callers pass
+    // optional config through verbatim (`heartbeatIntervalMs: maybeUndefined`),
+    // and a `...options` spread over defaults would replace 30s with
+    // `undefined`, which `setInterval` clamps to ~1ms.
     this.options = {
-      authTimeoutMs: 10_000,
-      heartbeatIntervalMs: 30_000,
-      heartbeatTimeoutMs: 10_000,
-      maxBackoffMs: 30_000,
-      minBackoffMs: 1_000,
       ...options,
+      authTimeoutMs: options.authTimeoutMs ?? 10_000,
+      heartbeatIntervalMs: options.heartbeatIntervalMs ?? 30_000,
+      heartbeatTimeoutMs: options.heartbeatTimeoutMs ?? 10_000,
+      maxBackoffMs: options.maxBackoffMs ?? 30_000,
+      minBackoffMs: options.minBackoffMs ?? 1_000,
     };
   }
 

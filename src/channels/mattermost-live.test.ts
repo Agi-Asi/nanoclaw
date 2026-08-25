@@ -41,7 +41,7 @@
  * the same `buildMattermostAdapter` the factory uses, so there is no copy to
  * drift.
  *
- * Against @nanoco/chat-adapter-mattermost 0.1.0. Under the unscoped npm
+ * Against the vendored Mattermost adapter. Under the unscoped npm
  * `chat-adapter-mattermost@1.1.3` the id, attachment and DM-classification
  * assertions below fail — that package encodes ids differently and cannot
  * deliver through the bridge. Keeping this suite runnable is what stops a
@@ -83,7 +83,7 @@ const HAS_LAB = MISSING.length === 0;
 // The original suite's one real weakness was `skipIf` alone: a suite that
 // skips by default cannot defend against a dependency swapping its wire
 // format underneath a stable-looking API (the unscoped npm
-// `chat-adapter-mattermost@1.1.3` looks the same from the import line).
+// `chat-adapter-mattermost@1.1.3` previously looked the same from the import line).
 // Two guards fix that:
 //   - a PARTIALLY configured lab is a misconfiguration, not a reason to skip;
 //   - MATTERMOST_LAB_REQUIRED=1 (what `pnpm test:mattermost-live` sets) turns

@@ -1,5 +1,5 @@
 /** Mattermost channel adapter — Chat SDK bridge registration. */
-import { MattermostAdapter } from '@nanoco/chat-adapter-mattermost';
+import { MattermostAdapter } from './mattermost-adapter/index.js';
 
 import { readEnvFile } from '../env.js';
 import type { ChannelDefaults } from './adapter.js';

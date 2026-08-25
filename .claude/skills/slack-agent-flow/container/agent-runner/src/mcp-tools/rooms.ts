@@ -1,17 +1,18 @@
 /**
- * Room management MCP tools: create_room, add_to_room.
+ * Slack room MCP tools: create_room, add_to_room, handoff.
  *
  * A "room" is one Slack group conversation shared by the user and N agents.
  * create_room is the team primitive — the multi-agent pattern is N
  * create_agent calls with room:'none', then ONE create_room naming all of
- * them. Both tools are fire-and-forget (create_agent pattern): they write an
- * outbound system row and return; the host resolves names, opens the
- * conversation, wires everyone, and reports back as a system note.
+ * them. The management tools are fire-and-forget (create_agent pattern):
+ * they write an outbound system row and return; the host resolves names,
+ * opens the conversation, wires everyone, and reports back as a system note.
+ * handoff uses the same system-action path to resolve real bot mentions and
+ * deliver through the caller's room adapter/thread.
  *
- * Authorization is enforced host-side by the guard (same trust split as
- * create_agent: trusted global-scope groups act directly, confined groups
- * hold for admin approval) — the container is untrusted and cannot be relied
- * on to gate itself.
+ * Authorization is host-side: create_room/add_to_room use the create_agent
+ * guard split; handoff needs no approval but re-validates destinations,
+ * same-room wiring, and content because the container is untrusted.
  *
  * This module also extends the base `create_agent` tool (see the extendTool
  * call at the bottom): the Slack flow adds `purpose` / `allow_guests` /
@@ -126,7 +127,57 @@ export const addToRoom: McpToolDefinition = {
   },
 };
 
-registerTools([createRoom, addToRoom]);
+export const handoff: McpToolDefinition = {
+  tool: {
+    name: 'handoff',
+    description:
+      'Post one Slack room message that reliably engages exactly the named sibling agent(s). Use one name for one responder or a list for several; never write raw <@...> mentions yourself. By default this targets the current Slack room/thread. From another session (for example immediately after create_room), pass the room destination name. Fire-and-forget: host-side validation rejects self, unknown agents, agents outside the room, duplicates, and embedded Slack mentions.',
+    inputSchema: {
+      type: 'object' as const,
+      properties: {
+        to: {
+          oneOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' }, minItems: 1 }],
+          description: 'One agent destination name, or an explicit list of agent destination names.',
+        },
+        text: { type: 'string', description: 'The message for the selected agents, without raw Slack mentions.' },
+        room: {
+          type: 'string',
+          description:
+            'Optional room destination name. Omit inside the room; provide it when handing off from another session.',
+        },
+      },
+      required: ['to', 'text'],
+    },
+  },
+  async handler(args) {
+    const to = typeof args.to === 'string' ? [args.to] : Array.isArray(args.to) ? args.to : [];
+    if (to.length === 0 || !to.every((name) => typeof name === 'string' && name.trim())) {
+      return err('to must be one agent name or a non-empty list of agent names');
+    }
+    const text = typeof args.text === 'string' ? args.text.trim() : '';
+    if (!text) return err('text is required');
+    if (/<(?:@|!)[^>]+>/.test(text)) return err('text must not contain raw Slack mention markup');
+    const room = typeof args.room === 'string' ? args.room.trim() : '';
+
+    const requestId = generateId();
+    await writeMessageOut({
+      id: requestId,
+      kind: 'system',
+      content: JSON.stringify({
+        action: 'handoff',
+        requestId,
+        to: to.map((name) => (name as string).trim()),
+        text,
+        ...(room ? { room } : {}),
+      }),
+    });
+
+    log(`handoff: ${requestId} → ${to.length} agent(s)`);
+    return ok(`Handing off to ${to.length} agent${to.length === 1 ? '' : 's'}.`);
+  },
+};
+
+registerTools([createRoom, addToRoom, handoff]);
 
 // ── create_agent extension (Slack agent flow) ──
 //

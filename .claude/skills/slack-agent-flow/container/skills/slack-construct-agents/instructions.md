@@ -18,6 +18,12 @@ for the sibling half:
   voice: say what the new agent is for and tag them with their `<@bot-user-id>` mention
   (send it literally; it renders as a mention). No mechanics, no member lists — the room's
   canvas tab already holds that.
+- **Choose responders explicitly.** For ordinary room coordination, use
+  `handoff({ to, text, room? })` instead of writing agent names or raw Slack mentions.
+  `to` may name one sibling or list several; select exactly the agents whose response the
+  user wants. Omit `room` while already in the room, or pass the room destination from a
+  `create_room` completion note. Room creation never chooses a first speaker or wakes
+  everyone automatically.
 - **Bot-to-bot hop budget.** The platform may cap consecutive bot-to-bot messages (~6)
   until a human speaks again, but do not rely on it — self-limit. Don't ping-pong with
   siblings: do the work, converge, hand back to the human.
